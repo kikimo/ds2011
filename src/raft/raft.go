@@ -201,6 +201,40 @@ type hbParams struct {
 //
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
+	rf.mu.Lock()
+	term := rf.currentTerm
+	role := rf.role
+	reply.Term = term
+	reply.VoteGranted = false
+
+	defer func() {
+		params := rvParams{
+			requestVoteArgs:  *args,
+			requestVoteReply: *reply,
+		}
+
+		go func() {
+			select {
+			case rf.rvChan <- params:
+			case <-time.After(HeartBeatTimeout):
+				DPrintf("%s %d timeout sending request vote result at term %d", role, rf.me, term)
+			}
+		}()
+	}()
+
+	if term > args.Term {
+		rf.mu.Unlock()
+		return
+	}
+
+	if term < args.Term {
+		rf.role = RoleFollower
+		rf.currentTerm = args.Term
+		rf.votedFor = args.CandiateID
+		reply.VoteGranted = true
+	}
+
+	rf.mu.Unlock()
 }
 
 type AppendEntriesArgs struct {

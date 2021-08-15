@@ -43,3 +43,11 @@ func TestRunLeader(t *testing.T) {
 func TestSendHeartbeat(t *testing.T) {
 	// TODO
 }
+
+func TestAppendEntries(t *testing.T) {
+	// TODO
+}
+
+func TestRequestVote(t *testing.T) {
+	// TODO
+}
