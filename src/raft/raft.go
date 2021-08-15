@@ -89,9 +89,11 @@ type Raft struct {
 	log         []LogEntry
 
 	// non-persistant field
-	role   RaftRole
-	hbChan chan hbParams
-	rvChan chan rvParams
+	role      RaftRole
+	hbChan    chan hbParams
+	rvChan    chan rvParams
+	election  Election
+	heartbeat Heartbeat
 }
 
 // return currentTerm and whether this server
@@ -216,7 +218,43 @@ type AppendEntriesReply struct {
 }
 
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
-	// TODO
+	rf.mu.Lock()
+	term := rf.currentTerm
+	role := rf.role
+	reply.Term = term
+	defer func() {
+		params := hbParams{
+			appendEntriesArgs:  *args,
+			appendEntriesReply: *reply,
+		}
+
+		go func() {
+			select {
+			case rf.hbChan <- params:
+			case <-time.After(HeartBeatTimeout):
+				DPrintf("%s %d timeout sending heartbeat result at term %d", role, rf.me, term)
+			}
+
+		}()
+	}()
+
+	// stale result
+	if term > args.Term {
+		reply.Success = false
+		rf.mu.Unlock()
+		return
+	}
+
+	// update currentTerm and convert to follower
+	if term < args.Term {
+		rf.currentTerm = args.Term
+		rf.role = RoleFollower
+	}
+
+	// a leagal heartbeat msg
+	// TODO append entries
+	reply.Success = true
+	rf.mu.Unlock()
 }
 
 //
@@ -388,17 +426,26 @@ WAIT:
 	}
 }
 
-func (rf *Raft) startElection(term int, voteResultChan chan struct{}) {
-	var vote int32 = 1 // one vote from self
-	size := len(rf.peers)
+type Election interface {
+	StartElection(term int, voteResultChan chan struct{})
+}
 
-	for i := range rf.peers {
-		if i == rf.me {
+type defaultElection struct {
+	rf *Raft
+}
+
+func (e *defaultElection) StartElection(term int, voteResultChan chan struct{}) {
+	// func (rf *Raft) startElection(term int, voteResultChan chan struct{}) {
+	var vote int32 = 1 // one vote from self
+	size := len(e.rf.peers)
+
+	for i := range e.rf.peers {
+		if i == e.rf.me {
 			continue
 		}
 
 		args := &RequestVoteArgs{
-			CandiateID:   rf.me,
+			CandiateID:   e.rf.me,
 			Term:         term,
 			LastLogIndex: 0,    // TODO
 			LastLogTerm:  term, // TODO
@@ -406,24 +453,24 @@ func (rf *Raft) startElection(term int, voteResultChan chan struct{}) {
 		reply := &RequestVoteReply{}
 		go func(server int, args *RequestVoteArgs, reply *RequestVoteReply) {
 			// TODO make it easier to perform unit test
-			ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
+			ok := e.rf.peers[server].Call("Raft.RequestVote", args, reply)
 			if !ok {
 				return
 			}
 
 			if reply.VoteGranted {
-				DPrintf("candidate %d failed to get vote from %d at term %d", rf.me, server, term)
+				DPrintf("candidate %d failed to get vote from %d at term %d", e.rf.me, server, term)
 				if reply.Term <= term {
 					return
 				}
 
-				rf.mu.Lock()
-				defer rf.mu.Unlock()
+				e.rf.mu.Lock()
+				defer e.rf.mu.Unlock()
 
-				if rf.currentTerm < reply.Term {
-					DPrintf("candidate %d convert to follower and update term from %d to %d", rf.me, rf.currentTerm, reply.Term)
-					rf.currentTerm = reply.Term
-					rf.role = RoleFollower
+				if e.rf.currentTerm < reply.Term {
+					DPrintf("candidate %d convert to follower and update term from %d to %d", e.rf.me, e.rf.currentTerm, reply.Term)
+					e.rf.currentTerm = reply.Term
+					e.rf.role = RoleFollower
 				}
 
 				return
@@ -434,10 +481,10 @@ func (rf *Raft) startElection(term int, voteResultChan chan struct{}) {
 			if atomic.LoadInt32(&vote) > int32((size/2 + 1)) {
 				select {
 				case voteResultChan <- struct{}{}:
-					DPrintf("candidate %d successful election result sent at term %d", rf.me, term)
+					DPrintf("candidate %d successful election result sent at term %d", e.rf.me, term)
 
 				case <-time.After(HeartBeatTimeout):
-					DPrintf("candidate %d timeout sending successful election result at term %d", rf.me, term)
+					DPrintf("candidate %d timeout sending successful election result at term %d", e.rf.me, term)
 				}
 			}
 		}(i, args, reply)
@@ -449,7 +496,7 @@ func (rf *Raft) runCandidate(term int, eto time.Duration) {
 	voteResultChan := make(chan struct{})
 
 	// start election
-	go rf.startElection(term, voteResultChan)
+	go rf.election.StartElection(term, voteResultChan)
 
 WAIT:
 	select {
@@ -487,11 +534,19 @@ WAIT:
 	}
 }
 
-func (rf *Raft) sendHeartbeat(term int) {
-	for i := range rf.peers {
+type Heartbeat interface {
+	SendHeartbeat(term int)
+}
+
+type defaultHeartbeat struct {
+	rf *Raft
+}
+
+func (h *defaultHeartbeat) SendHeartbeat(term int) {
+	for i := range h.rf.peers {
 		args := &AppendEntriesArgs{
 			Term:         term,
-			LeaderID:     rf.me,
+			LeaderID:     h.rf.me,
 			PrevLogIndex: 0,   // TODO
 			PrevLogTerm:  0,   // TODO
 			Entries:      nil, // TODO
@@ -499,7 +554,7 @@ func (rf *Raft) sendHeartbeat(term int) {
 		}
 		reply := &AppendEntriesReply{}
 		go func(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) {
-			ok := rf.peers[server].Call("Raft.AppendEntries", args, reply)
+			ok := h.rf.peers[server].Call("Raft.AppendEntries", args, reply)
 			if !ok {
 				return
 			}
@@ -508,11 +563,11 @@ func (rf *Raft) sendHeartbeat(term int) {
 				return
 			}
 
-			rf.mu.Lock()
-			defer rf.mu.Unlock()
-			if rf.currentTerm < reply.Term {
-				rf.role = RoleFollower
-				rf.currentTerm = reply.Term
+			h.rf.mu.Lock()
+			defer h.rf.mu.Unlock()
+			if h.rf.currentTerm < reply.Term {
+				h.rf.role = RoleFollower
+				h.rf.currentTerm = reply.Term
 			}
 		}(i, args, reply)
 	}
@@ -523,7 +578,7 @@ func (rf *Raft) runLeader(term int) {
 	to := HeartBeatTimeout
 
 	// send heartbeat
-	go rf.sendHeartbeat(term)
+	go rf.heartbeat.SendHeartbeat(term)
 
 WAIT:
 	select {
@@ -579,6 +634,8 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	// start ticker goroutine to start elections
 	rf.role = RoleFollower
+	rf.election = &defaultElection{rf: rf}
+	rf.heartbeat = &defaultHeartbeat{rf: rf}
 	rf.hbChan = make(chan hbParams)
 	rf.rvChan = make(chan rvParams)
 	go rf.ticker()
