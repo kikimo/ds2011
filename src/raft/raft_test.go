@@ -1,6 +1,39 @@
 package raft
 
-import "testing"
+import (
+	"testing"
+
+	"6.824/labrpc"
+)
+
+type fakeRaftRPCManager struct {
+}
+
+func (m *fakeRaftRPCManager) SendRequestVote(server int, args *RequestVoteArgs, reply *RequestVoteReply) bool {
+	return false
+}
+
+func (m *fakeRaftRPCManager) SendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
+	return false
+}
+
+func newFakeRaftRPCManager() RaftRPCManager {
+	return &fakeRaftRPCManager{}
+}
+
+func NewTestRaft(numPeers int) *Raft {
+	rf := &Raft{}
+	rf.peers = make([]*labrpc.ClientEnd, numPeers, numPeers)
+	rf.me = 0
+
+	// start ticker goroutine to start elections
+	rf.role = RoleFollower
+	rf.hbChan = make(chan hbParams)
+	rf.rvChan = make(chan rvParams)
+	rf.raftRPCManager = &defaultRaftRPCManager{rf}
+
+	return rf
+}
 
 func TestRunFollower(t *testing.T) {
 	// TODO
