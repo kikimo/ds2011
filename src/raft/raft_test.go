@@ -27,6 +27,17 @@ func TestRunCandidate(t *testing.T) {
 
 func TestStartElection(t *testing.T) {
 	// TODO
+	// cases:
+	//  1. win an election
+	//  2. lost an election
+	//  3. election tie
+	//  4. recieve higher term and convert to follower
+}
+
+func TestSendHeartbeat(t *testing.T) {
+	// TODO
+	// cases:
+	//  1. recieve higher term and convert to follower
 }
 
 func TestRunLeader(t *testing.T) {
@@ -38,10 +49,6 @@ func TestRunLeader(t *testing.T) {
 	// 4. recieve stale rv msg
 	// 5. recieve rv msg but not vote granted
 	// 6. recieve rv msg and grant vote
-}
-
-func TestSendHeartbeat(t *testing.T) {
-	// TODO
 }
 
 func TestAppendEntries(t *testing.T) {
