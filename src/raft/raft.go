@@ -268,7 +268,6 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			case <-time.After(HeartBeatTimeout):
 				DPrintf("%s %d timeout sending heartbeat result at term %d", role, rf.me, term)
 			}
-
 		}()
 	}()
 
@@ -466,6 +465,16 @@ type Election interface {
 
 type defaultElection struct {
 	rf *Raft
+}
+
+type RaftRPC interface {
+	RequestVote(args *RequestVoteArgs, reply *RequestVoteReply)
+	AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply)
+}
+
+type ElectionManager interface {
+	StartElection(term int, voteResultChan chan struct{})
+	SendHeartbeat(term int)
 }
 
 func (e *defaultElection) StartElection(term int, voteResultChan chan struct{}) {
