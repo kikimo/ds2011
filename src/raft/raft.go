@@ -89,10 +89,10 @@ type Raft struct {
 	log         []LogEntry
 
 	// non-persistant field
-	role           RaftRole
-	hbChan         chan hbParams
-	rvChan         chan rvParams
-	raftRPCManager RaftRPCManager
+	role       RaftRole
+	hbChan     chan hbParams
+	rvChan     chan rvParams
+	rpcManager RaftRPCManager
 }
 
 // return currentTerm and whether this server
@@ -250,6 +250,7 @@ type AppendEntriesReply struct {
 	Term    int
 }
 
+// rpc Implementation
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	rf.mu.Lock()
 	term := rf.currentTerm
@@ -493,7 +494,7 @@ func (rf *Raft) startElection(term int, voteResultChan chan struct{}) {
 		}
 		reply := &RequestVoteReply{}
 		go func(server int, args *RequestVoteArgs, reply *RequestVoteReply) {
-			ok := rf.raftRPCManager.SendRequestVote(server, args, reply)
+			ok := rf.rpcManager.SendRequestVote(server, args, reply)
 			if !ok {
 				return
 			}
@@ -590,7 +591,8 @@ func (rf *Raft) sendHeartbeat(term int) {
 		}
 		reply := &AppendEntriesReply{}
 		go func(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) {
-			ok := rf.raftRPCManager.SendAppendEntries(server, args, reply)
+			DPrintf("sending append entries rpc\n")
+			ok := rf.rpcManager.SendAppendEntries(server, args, reply)
 			if !ok {
 				return
 			}
@@ -672,7 +674,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.role = RoleFollower
 	rf.hbChan = make(chan hbParams)
 	rf.rvChan = make(chan rvParams)
-	rf.raftRPCManager = &defaultRaftRPCManager{rf}
+	rf.rpcManager = &defaultRaftRPCManager{rf}
 	go rf.ticker()
 
 	return rf
