@@ -1,4 +1,4 @@
 #!/bin/bash
 
-go test -race -failfast -run 2A
+go test -race -failfast -run SendHeartbeat -v
 
