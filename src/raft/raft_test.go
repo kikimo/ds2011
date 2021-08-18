@@ -89,7 +89,16 @@ func TestRunLeader(t *testing.T) {
 }
 
 func TestAppendEntries(t *testing.T) {
+	// next we should do:
 	// TODO
+	// cases:
+	//  1. ignore stale request
+	//  2. follower handle normal request(should resset election timer)
+	//  3. follower handle normal request and update term
+	//  4. candidate handle normal request and convert to follower
+
+	// more to do
+	// TODO handle log entry appending
 }
 
 func TestRequestVote(t *testing.T) {
