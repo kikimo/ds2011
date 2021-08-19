@@ -261,6 +261,20 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	term := rf.currentTerm
 	role := rf.role
 	reply.Term = term
+
+	// stale result
+	if term > args.Term {
+		reply.Success = false
+		rf.mu.Unlock()
+		return
+	}
+
+	// update currentTerm and convert to follower
+	if term < args.Term {
+		rf.currentTerm = args.Term
+		rf.role = RoleFollower
+	}
+
 	defer func() {
 		params := hbParams{
 			appendEntriesArgs:  *args,
@@ -275,19 +289,6 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			}
 		}()
 	}()
-
-	// stale result
-	if term > args.Term {
-		reply.Success = false
-		rf.mu.Unlock()
-		return
-	}
-
-	// update currentTerm and convert to follower
-	if term < args.Term {
-		rf.currentTerm = args.Term
-		rf.role = RoleFollower
-	}
 
 	// a leagal heartbeat msg
 	// TODO append entries

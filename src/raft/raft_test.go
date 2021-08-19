@@ -39,12 +39,12 @@ func newFakeRaftRPCManager(replyTerm int, replySuccess bool) *fakeRaftRPCManager
 	}
 }
 
-func newTestRaft(numPeers int, role RaftRole) *Raft {
+func newTestRaft(numPeers int, term int, role RaftRole) *Raft {
 	rf := &Raft{}
 	rf.peers = make([]*labrpc.ClientEnd, numPeers)
 	rf.me = 0
 	rf.role = role
-	rf.currentTerm = 0
+	rf.currentTerm = term
 
 	// start ticker goroutine to start elections
 	rf.hbChan = make(chan hbParams)
@@ -89,13 +89,92 @@ func TestRunLeader(t *testing.T) {
 }
 
 func TestAppendEntries(t *testing.T) {
-	// next we should do:
-	// TODO
 	// cases:
-	//  1. ignore stale request
-	//  2. follower handle normal request(should resset election timer)
-	//  3. follower handle normal request and update term
-	//  4. candidate handle normal request and convert to follower
+	//  1. ~~ignore stale request~~
+	//  2. ~~follower handle normal request(should resset election timer)~~
+	//  3. ~~candidate handle normal request, update term and convert to follower~~
+	cases := []struct {
+		name              string
+		numPeers          int
+		currentTerm       int
+		expectedRaftTerm  int
+		expectedReplyTerm int
+		expectedSuccess   bool
+		expectedRaftRole  RaftRole
+		role              RaftRole
+		args              *AppendEntriesArgs
+		reply             *AppendEntriesReply
+		bolck             bool
+	}{
+		{
+			name:              "Ignore stale append entries",
+			numPeers:          3,
+			currentTerm:       1,
+			expectedRaftTerm:  1,
+			expectedReplyTerm: 1,
+			expectedRaftRole:  RoleFollower,
+			role:              RoleFollower,
+			expectedSuccess:   false,
+			args: &AppendEntriesArgs{
+				Term:     0,
+				LeaderID: 1,
+			},
+			reply: &AppendEntriesReply{},
+			bolck: true,
+		},
+		{
+			name:              "Normal hb request",
+			numPeers:          3,
+			currentTerm:       1,
+			role:              RoleFollower,
+			expectedReplyTerm: 1,
+			expectedRaftTerm:  1,
+			expectedRaftRole:  RoleFollower,
+			args: &AppendEntriesArgs{
+				Term:     1,
+				LeaderID: 1,
+			},
+			expectedSuccess: true,
+			reply:           &AppendEntriesReply{},
+			bolck:           false,
+		},
+		{
+			name:              "Candidate handle normal request, update term and convert to follower",
+			numPeers:          3,
+			currentTerm:       0,
+			role:              RoleCandidate,
+			expectedReplyTerm: 0,
+			expectedRaftTerm:  1,
+			expectedRaftRole:  RoleFollower,
+			args: &AppendEntriesArgs{
+				Term:     1,
+				LeaderID: 1,
+			},
+			expectedSuccess: true,
+			reply:           &AppendEntriesReply{},
+		},
+	}
+
+	for _, c := range cases {
+		rf := newTestRaft(c.numPeers, c.currentTerm, c.role)
+		rf.AppendEntries(c.args, c.reply)
+
+		if c.reply.Success != c.expectedSuccess {
+			t.Errorf("Error running %s, expect reply.success %t but got %t", c.name, c.expectedSuccess, c.reply.Success)
+		}
+
+		if c.reply.Term != c.expectedReplyTerm {
+			t.Errorf("Error running %s, expect reply.Term %d but got %d", c.name, c.expectedReplyTerm, c.reply.Term)
+		}
+
+		if c.expectedRaftRole != rf.role {
+			t.Errorf("Error running %s, expect raft.role %s but got %s", c.name, c.expectedRaftRole, rf.role)
+		}
+
+		if rf.currentTerm != c.expectedRaftTerm {
+			t.Errorf("Error running %s, expect raft.currentTerm %d but got %d", c.name, c.expectedRaftTerm, rf.currentTerm)
+		}
+	}
 
 	// more to do
 	// TODO handle log entry appending
@@ -121,14 +200,16 @@ func TestSendHeartbeat(t *testing.T) {
 	cases := []struct {
 		peerCount    int
 		isLeader     bool
-		replyTerm    int
 		replySuccess bool
+		replyTerm    int
+		currentTerm  int
 		expectedTerm int
 	}{
 		{
 			peerCount:    3,
 			isLeader:     true,
 			replyTerm:    0,
+			currentTerm:  0,
 			replySuccess: true,
 			expectedTerm: 0,
 		},
@@ -136,13 +217,14 @@ func TestSendHeartbeat(t *testing.T) {
 			peerCount:    3,
 			isLeader:     false,
 			replyTerm:    1,
+			currentTerm:  0,
 			replySuccess: false,
 			expectedTerm: 1,
 		},
 	}
 
 	for i, c := range cases {
-		rf := newTestRaft(c.peerCount, RoleLeader)
+		rf := newTestRaft(c.peerCount, c.currentTerm, RoleLeader)
 		rpcManager := newFakeRaftRPCManager(c.replyTerm, c.replySuccess)
 		rf.rpcManager = rpcManager
 
