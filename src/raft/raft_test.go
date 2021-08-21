@@ -88,7 +88,7 @@ func TestRunLeader(t *testing.T) {
 	// 6. recieve rv msg and grant vote
 }
 
-func TestAppendEntries(t *testing.T) {
+func TestUTAppendEntries(t *testing.T) {
 	// cases:
 	//  1. ~~ignore stale request~~
 	//  2. ~~follower handle normal request(should resset election timer)~~
@@ -180,8 +180,33 @@ func TestAppendEntries(t *testing.T) {
 	// TODO handle log entry appending
 }
 
-func TestRequestVote(t *testing.T) {
+func TestUTRequestVote(t *testing.T) {
 	// TODO
+	// cases:
+	// 1. vote granted
+	// 	1.1 stale term
+	// 	1.2 vote granted to other candidate
+	// 2. vote no granted
+	cases := []struct {
+		name     string
+		numPeers int
+		term     int
+		role     RaftRole
+	}{
+		{
+			name:     "request vote, stale term",
+			numPeers: 3,
+			term:     0,
+			role:     RoleCandidate,
+		},
+	}
+
+	for _, c := range cases {
+		rf := newTestRaft(c.numPeers, c.term, c.role)
+		t.Log(rf)
+		// TODO
+		// rf.RequestVote(l)
+	}
 }
 
 func TestStartElection(t *testing.T) {
@@ -193,7 +218,7 @@ func TestStartElection(t *testing.T) {
 	//  4. recieve higher term and convert to follower
 }
 
-func TestSendHeartbeat(t *testing.T) {
+func TestUTSendHeartbeat(t *testing.T) {
 	// cases:
 	//  1. recieve same term and remain follower
 	//  2. recieve higher term and convert to follower

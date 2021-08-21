@@ -211,6 +211,18 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	reply.Term = term
 	reply.VoteGranted = false
 
+	// no vote granted
+	if term > args.Term || (term == args.Term && rf.votedFor != 0) {
+		rf.mu.Unlock()
+		return
+	}
+
+	rf.role = RoleFollower
+	rf.currentTerm = args.Term
+	rf.votedFor = args.CandiateID + 1
+	reply.VoteGranted = true
+	rf.mu.Unlock()
+
 	defer func() {
 		params := rvParams{
 			requestVoteArgs:  *args,
@@ -225,20 +237,6 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 			}
 		}()
 	}()
-
-	if term > args.Term {
-		rf.mu.Unlock()
-		return
-	}
-
-	if term < args.Term {
-		rf.role = RoleFollower
-		rf.currentTerm = args.Term
-		rf.votedFor = args.CandiateID
-		reply.VoteGranted = true
-	}
-
-	rf.mu.Unlock()
 }
 
 type AppendEntriesArgs struct {
