@@ -8,6 +8,13 @@ import (
 	"6.824/labrpc"
 )
 
+type raftStatus struct {
+	numPeers int
+	term     int
+	votedFor int
+	role     RaftRole
+}
+
 type fakeRaftRPCManager struct {
 	rf                    *Raft
 	replyTerm             int
@@ -37,6 +44,23 @@ func newFakeRaftRPCManager(replyTerm int, replySuccess bool) *fakeRaftRPCManager
 		replyTerm:    replyTerm,
 		replySuccess: replySuccess,
 	}
+}
+
+func _newTestRaft(status *raftStatus) *Raft {
+	rf := &Raft{}
+	rf.peers = make([]*labrpc.ClientEnd, status.numPeers)
+	rf.me = 0
+	rf.role = status.role
+	rf.currentTerm = status.term
+	rf.votedFor = status.votedFor
+
+	// start ticker goroutine to start elections
+	rf.hbChan = make(chan hbParams)
+	rf.rvChan = make(chan rvParams)
+	// rf.raftRPCManager = &fakeRaftRPCManager{rf: rf}
+
+	return rf
+
 }
 
 func newTestRaft(numPeers int, term int, role RaftRole) *Raft {
@@ -181,31 +205,110 @@ func TestUTAppendEntries(t *testing.T) {
 }
 
 func TestUTRequestVote(t *testing.T) {
-	// TODO
 	// cases:
-	// 1. vote granted
+	// 1. vote no granted
 	// 	1.1 stale term
 	// 	1.2 vote granted to other candidate
-	// 2. vote no granted
+	// 1. vote granted
+	// what to check
+	//  1. reply term
+	//  2. reply success status
+	//  3. raft term
+	//  4. raft role
 	cases := []struct {
-		name     string
-		numPeers int
-		term     int
-		role     RaftRole
+		name                     string
+		rfStatus                 *raftStatus
+		numPeers                 int
+		term                     int
+		role                     RaftRole
+		args                     *RequestVoteArgs
+		reply                    *RequestVoteReply
+		expectedReplyTerm        int
+		expectedReplyVoteGranted bool
+		expectedRaftTerm         int
+		expectedRaftRole         RaftRole
 	}{
 		{
-			name:     "request vote, stale term",
-			numPeers: 3,
-			term:     0,
-			role:     RoleCandidate,
+			name: "request vote, stale term",
+			rfStatus: &raftStatus{
+				numPeers: 3,
+				term:     2,
+				role:     RoleLeader,
+				votedFor: 0 + 1, // voted for self
+			},
+			args: &RequestVoteArgs{
+				CandiateID:   1,
+				Term:         1,
+				LastLogTerm:  0, // TODO update for log stale check
+				LastLogIndex: 0,
+			},
+			reply:                    &RequestVoteReply{},
+			expectedReplyTerm:        2,
+			expectedReplyVoteGranted: false,
+			expectedRaftTerm:         2,
+			expectedRaftRole:         RoleLeader,
+		},
+		{
+			name: "request vote, vote granted to others",
+			rfStatus: &raftStatus{
+				numPeers: 3,
+				term:     2,
+				role:     RoleLeader,
+				votedFor: 1, // voted for self
+			},
+			args: &RequestVoteArgs{
+				CandiateID:   1,
+				Term:         2,
+				LastLogTerm:  0, // TODO update for log stale check
+				LastLogIndex: 0,
+			},
+			reply:                    &RequestVoteReply{},
+			expectedReplyTerm:        2,
+			expectedReplyVoteGranted: false,
+			expectedRaftTerm:         2,
+			expectedRaftRole:         RoleLeader,
+		},
+		{
+			name: "vote granted",
+			rfStatus: &raftStatus{
+				numPeers: 3,
+				term:     2,
+				role:     RoleLeader,
+				votedFor: 1, // voted for self
+			},
+			args: &RequestVoteArgs{
+				CandiateID:   1,
+				Term:         3,
+				LastLogTerm:  0, // TODO update for log stale check
+				LastLogIndex: 0,
+			},
+			reply:                    &RequestVoteReply{},
+			expectedReplyTerm:        2,
+			expectedReplyVoteGranted: true,
+			expectedRaftTerm:         3,
+			expectedRaftRole:         RoleFollower,
 		},
 	}
 
 	for _, c := range cases {
-		rf := newTestRaft(c.numPeers, c.term, c.role)
-		t.Log(rf)
-		// TODO
-		// rf.RequestVote(l)
+		rf := _newTestRaft(c.rfStatus)
+		rf.RequestVote(c.args, c.reply)
+
+		if c.reply.Term != c.expectedReplyTerm {
+			t.Errorf("Error running %s: expect reply term %d but got %d", c.name, c.expectedRaftTerm, c.reply.Term)
+		}
+
+		if c.reply.VoteGranted != c.expectedReplyVoteGranted {
+			t.Errorf("Error running %s: expect reply voteGranted %t but got %t", c.name, c.expectedReplyVoteGranted, c.reply.VoteGranted)
+		}
+
+		if c.expectedRaftTerm != rf.currentTerm {
+			t.Errorf("Error running %s: expect raft term %d but got %d", c.name, c.expectedRaftTerm, rf.currentTerm)
+		}
+
+		if c.expectedRaftRole != rf.role {
+			t.Errorf("Error running %s: expect raft role %s but got %s", c.name, c.expectedRaftRole, rf.role)
+		}
 	}
 }
 
