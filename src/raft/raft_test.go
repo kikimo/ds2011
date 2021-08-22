@@ -519,7 +519,6 @@ func TestUTRequestVote(t *testing.T) {
 }
 
 func TestUTStartElection(t *testing.T) {
-	// TODO
 	// cases:
 	//  1. win an election
 	//  2. election tie
@@ -543,6 +542,13 @@ func TestUTStartElection(t *testing.T) {
 					reply: &RequestVoteReply{
 						Term:        0,
 						VoteGranted: true,
+					},
+				},
+				{
+					ok: true,
+					reply: &RequestVoteReply{
+						Term:        0,
+						VoteGranted: false,
 					},
 				},
 			},

@@ -497,7 +497,7 @@ func (rf *Raft) startElection(term int, voteResultChan chan struct{}) {
 		}
 		reply := &RequestVoteReply{}
 		go func(server int, args *RequestVoteArgs, reply *RequestVoteReply) {
-			DPrintf("candidate %d sending vote request to %d: %+v", rf.me, server, *args)
+			DPrintf("candidate %d sending vote request to %d at term %d: %+v", rf.me, server, term, *args)
 			ok := rf.rpcManager.SendRequestVote(server, args, reply)
 			if !ok {
 				return
@@ -525,7 +525,7 @@ func (rf *Raft) startElection(term int, voteResultChan chan struct{}) {
 			// check if we win the vote
 			atomic.AddInt32(&vote, 1)
 			votedGranted := atomic.LoadInt32(&vote)
-			if votedGranted > int32((size/2 + 1)) {
+			if votedGranted > int32((size / 2)) {
 				select {
 				case voteResultChan <- struct{}{}:
 					DPrintf("candidate %d successful election result sent at term %d", rf.me, term)
@@ -554,7 +554,10 @@ WAIT:
 		rf.mu.Lock()
 		defer rf.mu.Unlock()
 		if rf.currentTerm == term && rf.role == RoleCandidate {
+			DPrintf("candidate %d become leader at term %d", rf.me, rf.currentTerm)
 			rf.role = RoleLeader
+		} else {
+			DPrintf("candidate %d not become leader at term %d(vote term %d)", rf.me, rf.currentTerm, term)
 		}
 
 	case params := <-rf.hbChan:
@@ -597,7 +600,7 @@ func (rf *Raft) sendHeartbeat(term int) {
 		}
 		reply := &AppendEntriesReply{}
 		go func(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) {
-			DPrintf("sending append entries rpc\n")
+			DPrintf("leader %d sending append entries rpc\n", rf.me)
 			ok := rf.rpcManager.SendAppendEntries(server, args, reply)
 			if !ok {
 				return
