@@ -400,7 +400,7 @@ func (rf *Raft) ticker() {
 			rf.currentTerm += 1
 			rf.mu.Unlock()
 			eto := getElectionTimeout()
-			rf.runCandidate(term, eto)
+			rf.runCandidate(term+1, eto)
 
 		case RoleLeader:
 			rf.mu.Unlock()
@@ -497,7 +497,7 @@ func (rf *Raft) startElection(term int, voteResultChan chan struct{}) {
 		}
 		reply := &RequestVoteReply{}
 		go func(server int, args *RequestVoteArgs, reply *RequestVoteReply) {
-			DPrintf("candidate %d sending vote request: %+v", rf.me, *args)
+			DPrintf("candidate %d sending vote request to %d: %+v", rf.me, server, *args)
 			ok := rf.rpcManager.SendRequestVote(server, args, reply)
 			if !ok {
 				return
