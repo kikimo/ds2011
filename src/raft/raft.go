@@ -498,12 +498,14 @@ func (rf *Raft) startElection(term int, voteResultChan chan struct{}) {
 		}
 		reply := &RequestVoteReply{}
 		go func(server int, args *RequestVoteArgs, reply *RequestVoteReply) {
+			DPrintf("candidate %d sending vote request: %+v", rf.me, *args)
 			ok := rf.rpcManager.SendRequestVote(server, args, reply)
 			if !ok {
 				return
 			}
+			DPrintf("candidate %d recieve vote result from %d: %+v", rf.me, server, *reply)
 
-			if reply.VoteGranted {
+			if !reply.VoteGranted {
 				DPrintf("candidate %d failed to get vote from %d at term %d", rf.me, server, term)
 				if reply.Term <= term {
 					return
@@ -523,7 +525,8 @@ func (rf *Raft) startElection(term int, voteResultChan chan struct{}) {
 
 			// check if we win the vote
 			atomic.AddInt32(&vote, 1)
-			if atomic.LoadInt32(&vote) > int32((size/2 + 1)) {
+			votedGranted := atomic.LoadInt32(&vote)
+			if votedGranted > int32((size/2 + 1)) {
 				select {
 				case voteResultChan <- struct{}{}:
 					DPrintf("candidate %d successful election result sent at term %d", rf.me, term)

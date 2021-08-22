@@ -1,6 +1,8 @@
 package raft
 
 import (
+	"fmt"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -15,34 +17,65 @@ type raftStatus struct {
 	role     RaftRole
 }
 
+type testAppendEntriesReply struct {
+	ok    bool
+	reply *AppendEntriesReply
+}
+
+type testRequestVoteReply struct {
+	ok    bool
+	reply *RequestVoteReply
+}
+
 type fakeRaftRPCManager struct {
-	rf                    *Raft
-	replyTerm             int
-	replySuccess          bool
+	// rf                    *Raft
 	appendEntriesRPCCount int32
 	requestVoteRPCCount   int32
+	appendLock            sync.Mutex
+	appendEntriesReplies  []*testAppendEntriesReply
+	appendEntriesIndex    int
+	voteLock              sync.Mutex
+	requestVoteReplies    []*testRequestVoteReply
+	requestVoteIndex      int
 }
 
 func (m *fakeRaftRPCManager) SendRequestVote(server int, args *RequestVoteArgs, reply *RequestVoteReply) bool {
 	atomic.AddInt32(&m.requestVoteRPCCount, 1)
-	return false
+	m.voteLock.Lock()
+	defer m.voteLock.Unlock()
+	sz := len(m.requestVoteReplies)
+	if m.requestVoteIndex >= sz {
+		panic(fmt.Sprintf("request vote index %d out of range, max length %d", m.requestVoteIndex, sz))
+	}
+
+	testReply := m.requestVoteReplies[m.requestVoteIndex]
+	*reply = *testReply.reply
+	m.requestVoteIndex = (m.requestVoteIndex + 1) % sz
+	// fmt.Printf("respond to vote: %+v\n", *reply)
+
+	return testReply.ok
 }
 
 func (m *fakeRaftRPCManager) SendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
 	atomic.AddInt32(&m.appendEntriesRPCCount, 1)
-	// TODO implement me
-	// fmt.Printf("after add %d, %p\n", atomic.LoadInt32(&m.appendEntriesRPCCount), &m.appendEntriesRPCCount)
-	// fmt.Printf("after add %d\n", m.appendEntriesRPCCount)
-	// fmt.Printf("recieve append entries call\n")
-	reply.Success = m.replySuccess
-	reply.Term = m.replyTerm
-	return true
+	m.appendLock.Lock()
+	defer m.appendLock.Unlock()
+	sz := len(m.appendEntriesReplies)
+	if m.appendEntriesIndex >= sz {
+		panic(fmt.Sprintf("append entries index %d out of range, max length %d", m.appendEntriesIndex, sz))
+	}
+
+	testReply := m.appendEntriesReplies[m.appendEntriesIndex]
+	*reply = *testReply.reply
+	m.appendEntriesIndex = (m.appendEntriesIndex + 1) % sz
+
+	return testReply.ok
 }
 
-func newFakeRaftRPCManager(replyTerm int, replySuccess bool) *fakeRaftRPCManager {
+func newFakeRaftRPCManager(appendReplies []*testAppendEntriesReply, voteReplies []*testRequestVoteReply) *fakeRaftRPCManager {
 	return &fakeRaftRPCManager{
-		replyTerm:    replyTerm,
-		replySuccess: replySuccess,
+		appendEntriesReplies: appendReplies,
+		requestVoteReplies:   voteReplies,
 	}
 }
 
@@ -312,48 +345,150 @@ func TestUTRequestVote(t *testing.T) {
 	}
 }
 
-func TestStartElection(t *testing.T) {
+func TestUTStartElection(t *testing.T) {
 	// TODO
 	// cases:
 	//  1. win an election
-	//  2. lost an election
-	//  3. election tie
-	//  4. recieve higher term and convert to follower
+	//  2. election tie
+	//  3. lost an election(recieve higher term and convert to follower)
+	cases := []struct {
+		name        string
+		peerCount   int
+		currentTerm int
+		voteReplies []*testRequestVoteReply
+		// expectedRole RaftRole
+		// expectedTerm int
+		win bool
+	}{
+		{
+			name:        "win election",
+			peerCount:   3,
+			currentTerm: 0,
+			voteReplies: []*testRequestVoteReply{
+				{
+					ok: true,
+					reply: &RequestVoteReply{
+						Term:        0,
+						VoteGranted: true,
+					},
+				},
+			},
+			// expectedRole: RoleLeader,
+			// expectedTerm: 0,
+			win: true,
+		},
+		{
+			name:        "election tie",
+			peerCount:   3,
+			currentTerm: 0,
+			voteReplies: []*testRequestVoteReply{
+				{
+					ok: true,
+					reply: &RequestVoteReply{
+						Term:        0,
+						VoteGranted: false,
+					},
+				},
+			},
+			win: false,
+		},
+		{
+			name:        "lose an election",
+			peerCount:   3,
+			currentTerm: 0,
+			voteReplies: []*testRequestVoteReply{
+				{
+					ok: true,
+					reply: &RequestVoteReply{
+						Term:        1,
+						VoteGranted: false,
+					},
+				},
+			},
+			win: false,
+		},
+	}
+
+	for _, c := range cases {
+		rf := newTestRaft(c.peerCount, c.currentTerm, RoleCandidate)
+		rpcManager := newFakeRaftRPCManager(nil, c.voteReplies)
+		rf.rpcManager = rpcManager
+
+		resultChan := make(chan struct{})
+		rf.startElection(rf.currentTerm, resultChan)
+		// time.Sleep(10 * MaxElectionTimeout * time.Millisecond)
+
+		select {
+		case <-resultChan:
+			if !c.win {
+				t.Errorf("case %s expect not to win an election but not", c.name)
+			}
+		case <-time.After(MaxElectionTimeout * time.Millisecond):
+			if c.win {
+				t.Errorf("case %s expect to win an election but not", c.name)
+			}
+		}
+
+		// if rf.role != c.expectedRole {
+		// 	t.Errorf("case %s expect raft to be role %s but got %s", c.name, c.expectedRole, rf.role)
+		// }
+
+		// if rf.currentTerm != c.expectedTerm {
+		// 	t.Errorf("case %s expect raft to at term %d but got %d", c.name, c.expectedTerm, rf.currentTerm)
+		// }
+	}
 }
 
 func TestUTSendHeartbeat(t *testing.T) {
 	// cases:
-	//  1. recieve same term and remain follower
+	//  1. recieve same term and remain leader
 	//  2. recieve higher term and convert to follower
 	cases := []struct {
-		peerCount    int
-		isLeader     bool
-		replySuccess bool
-		replyTerm    int
-		currentTerm  int
-		expectedTerm int
+		name          string
+		peerCount     int
+		isLeader      bool
+		currentTerm   int
+		expectedTerm  int
+		appendReplies []*testAppendEntriesReply
 	}{
 		{
+			name:         "'remain leader'",
 			peerCount:    3,
 			isLeader:     true,
-			replyTerm:    0,
 			currentTerm:  0,
-			replySuccess: true,
 			expectedTerm: 0,
+
+			appendReplies: []*testAppendEntriesReply{
+				{
+					ok: true,
+					reply: &AppendEntriesReply{
+						Success: true,
+						Term:    0,
+					},
+				},
+			},
 		},
 		{
+			name:         "'converted to follower'",
 			peerCount:    3,
 			isLeader:     false,
-			replyTerm:    1,
 			currentTerm:  0,
-			replySuccess: false,
 			expectedTerm: 1,
+			appendReplies: []*testAppendEntriesReply{
+				{
+					ok: true,
+					reply: &AppendEntriesReply{
+						Success: false,
+						Term:    1,
+					},
+				},
+			},
 		},
 	}
 
-	for i, c := range cases {
+	for _, c := range cases {
 		rf := newTestRaft(c.peerCount, c.currentTerm, RoleLeader)
-		rpcManager := newFakeRaftRPCManager(c.replyTerm, c.replySuccess)
+		rpcManager := newFakeRaftRPCManager(c.appendReplies, nil)
 		rf.rpcManager = rpcManager
 
 		rf.sendHeartbeat(rf.currentTerm)
@@ -361,16 +496,16 @@ func TestUTSendHeartbeat(t *testing.T) {
 		time.Sleep(MaxElectionTimeout * time.Millisecond)
 		rpcCount := int(atomic.LoadInt32(&(rpcManager.appendEntriesRPCCount)))
 		if rpcCount != c.peerCount-1 {
-			t.Errorf("case %d expect %d append entries rpc but got %d\n", i+1, c.peerCount-1, rpcCount)
+			t.Errorf("case %s expect %d append entries rpc but got %d\n", c.name, c.peerCount-1, rpcCount)
 		}
 
 		term, isLeader := rf.GetState()
 		if term != c.expectedTerm {
-			t.Errorf("case %d expect raft to at term %d but got %d", i, c.expectedTerm, term)
+			t.Errorf("case %s expect raft to at term %d but got %d", c.name, c.expectedTerm, term)
 		}
 
 		if isLeader != c.isLeader {
-			t.Errorf("case %d expect raft to be leader %t, but got %t", i, c.isLeader, isLeader)
+			t.Errorf("case %s expect raft to be leader %t, but got %t", c.name, c.isLeader, isLeader)
 		}
 	}
 }
