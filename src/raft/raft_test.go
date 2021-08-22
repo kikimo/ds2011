@@ -111,8 +111,7 @@ func newTestRaft(numPeers int, term int, role RaftRole) *Raft {
 	return rf
 }
 
-func TestRunFollower(t *testing.T) {
-	// TODO
+func TestUTRunFollower(t *testing.T) {
 	// cases:
 	// 1. eto time out, become candidate
 	// 2. receive hb msg from leader
@@ -120,6 +119,180 @@ func TestRunFollower(t *testing.T) {
 	// 4. receive rv msg and grant vote
 	// 5. receive rv msg but not vote granted
 	// 6. receive stale rv msg
+	cases := []struct {
+		name           string
+		eto            time.Duration
+		testRaftStatus *raftStatus
+		testRVParams   *rvParams
+		testHBParams   *hbParams
+		expectedRole   RaftRole
+		expectedTerm   int
+		timeout        bool
+	}{
+		{
+			name: "follower become candidate",
+			eto:  MinElectionTimeout * time.Millisecond,
+			testRaftStatus: &raftStatus{
+				numPeers: 3,
+				term:     0,
+				votedFor: 0,
+				role:     RoleFollower,
+			},
+			expectedRole: RoleCandidate,
+			expectedTerm: 0,
+			timeout:      true,
+		},
+		{
+			name: "follower recieve legal heartbeat msg",
+			eto:  MinElectionTimeout * time.Millisecond * 2,
+			testRaftStatus: &raftStatus{
+				numPeers: 3,
+				term:     1,
+				votedFor: 1,
+				role:     RoleFollower,
+			},
+			expectedRole: RoleFollower,
+			expectedTerm: 1,
+			testHBParams: &hbParams{
+				appendEntriesArgs: AppendEntriesArgs{
+					Term:     2,
+					LeaderID: 1,
+				},
+			},
+			timeout: false,
+		},
+		{
+			name: "follower recieve stale heartbeat msg",
+			eto:  MinElectionTimeout * time.Millisecond,
+			testRaftStatus: &raftStatus{
+				numPeers: 3,
+				term:     3,
+				votedFor: 1,
+				role:     RoleFollower,
+			},
+			expectedRole: RoleCandidate,
+			expectedTerm: 3,
+			testHBParams: &hbParams{
+				appendEntriesArgs: AppendEntriesArgs{
+					Term:     2,
+					LeaderID: 1,
+				},
+			},
+			timeout: true,
+		},
+		{
+			name: "follower grant vote",
+			eto:  MinElectionTimeout * time.Millisecond,
+			testRaftStatus: &raftStatus{
+				numPeers: 3,
+				term:     3,
+				votedFor: 1,
+				role:     RoleFollower,
+			},
+			expectedRole: RoleFollower,
+			expectedTerm: 3,
+			testRVParams: &rvParams{
+				requestVoteArgs: RequestVoteArgs{
+					CandiateID: 1,
+					Term:       4,
+				},
+				requestVoteReply: RequestVoteReply{
+					VoteGranted: true,
+					Term:        3,
+				},
+			},
+			timeout: false,
+		},
+		{
+			name: "follower not grant vote",
+			eto:  MinElectionTimeout * time.Millisecond,
+			testRaftStatus: &raftStatus{
+				numPeers: 3,
+				term:     3,
+				votedFor: 1,
+				role:     RoleFollower,
+			},
+			expectedRole: RoleCandidate,
+			expectedTerm: 3,
+			testRVParams: &rvParams{
+				requestVoteArgs: RequestVoteArgs{
+					CandiateID: 1,
+					Term:       3,
+				},
+				requestVoteReply: RequestVoteReply{
+					VoteGranted: false,
+					Term:        3,
+				},
+			},
+			timeout: true,
+		},
+		{
+			name: "follower recieve stale vote request",
+			eto:  MinElectionTimeout * time.Millisecond,
+			testRaftStatus: &raftStatus{
+				numPeers: 3,
+				term:     3,
+				votedFor: 1,
+				role:     RoleFollower,
+			},
+			expectedRole: RoleCandidate,
+			expectedTerm: 3,
+			testRVParams: &rvParams{
+				requestVoteArgs: RequestVoteArgs{
+					CandiateID: 1,
+					Term:       2,
+				},
+				requestVoteReply: RequestVoteReply{
+					VoteGranted: false,
+					Term:        3,
+				},
+			},
+			timeout: true,
+		},
+	}
+
+	for _, c := range cases {
+		rf := _newTestRaft(c.testRaftStatus)
+		if c.testHBParams != nil {
+			go func() {
+				select {
+				case rf.hbChan <- *c.testHBParams:
+				case <-time.After(MaxElectionTimeout * time.Millisecond):
+				}
+			}()
+		}
+
+		if c.testRVParams != nil {
+			go func() {
+				select {
+				case rf.rvChan <- *c.testRVParams:
+				case <-time.After(MaxElectionTimeout * time.Millisecond):
+				}
+			}()
+		}
+
+		now := time.Now()
+		rf.runFollower(rf.currentTerm, c.eto)
+		delta := time.Since(now)
+		if c.timeout {
+			if delta < c.eto {
+				t.Errorf("Error running %s, expect follower eto but not", c.name)
+			}
+		} else {
+			if delta > c.eto {
+				t.Errorf("Error running %s, expect not follower eto but not", c.name)
+			}
+		}
+
+		if rf.role != c.expectedRole {
+			t.Errorf("Error running %s, expect raft role to be %s but got %s", c.name, c.expectedRole, rf.role)
+		}
+
+		if rf.currentTerm != c.expectedTerm {
+			t.Errorf("Error running %s, expect raft term to be %d but got %d", c.name, c.expectedTerm, rf.currentTerm)
+		}
+
+	}
 }
 
 func TestRunCandidate(t *testing.T) {

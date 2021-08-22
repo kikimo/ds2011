@@ -381,7 +381,7 @@ func (rf *Raft) killed() bool {
 // The ticker go routine starts a new election if this peer hasn't received
 // heartsbeats recently.
 func (rf *Raft) ticker() {
-	for rf.killed() == false {
+	for !rf.killed() {
 		rf.mu.Lock()
 		role := rf.role
 		term := rf.currentTerm
@@ -416,14 +416,10 @@ func getElectionTimeout() time.Duration {
 	return time.Duration(rand.Intn(ElectionTimeoutInterval)+MinElectionTimeout) * time.Millisecond
 }
 
-func getHeartBeatTimeout() time.Duration {
-	return HeartBeatTimeout * time.Millisecond
-}
-
 // update time out by:
 // to = to - (time.Now() - start)
 func updateTO(to *time.Duration, start time.Time) {
-	*to -= time.Now().Sub(start)
+	*to -= time.Since(start)
 }
 
 func (rf *Raft) runFollower(term int, eto time.Duration) {
@@ -445,9 +441,12 @@ WAIT:
 			updateTO(&eto, start)
 			goto WAIT
 		}
+		DPrintf("follower %d recieve hb msg from leader %d and return\n", rf.me, params.appendEntriesArgs.LeaderID)
+		return
 
 	case params := <-rf.rvChan:
 		// stale request vote msg
+		DPrintf("follower %d recieve rv param from %d: %+v\n", rf.me, params.requestVoteArgs.CandiateID, params)
 		if params.requestVoteArgs.Term < term {
 			DPrintf("follower %d recieve stale request vote msg at term %d: %+v", rf.me, term, params)
 			updateTO(&eto, start)
