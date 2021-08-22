@@ -92,6 +92,7 @@ type Raft struct {
 	role       RaftRole
 	hbChan     chan hbParams
 	rvChan     chan rvParams
+	applyCh    chan ApplyMsg
 	rpcManager RaftRPCManager
 }
 
@@ -371,6 +372,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 func (rf *Raft) Kill() {
 	atomic.StoreInt32(&rf.dead, 1)
 	// Your code here, if desired.
+	close(rf.applyCh)
 }
 
 func (rf *Raft) killed() bool {
@@ -683,6 +685,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.role = RoleFollower
 	rf.hbChan = make(chan hbParams)
 	rf.rvChan = make(chan rvParams)
+	rf.applyCh = applyCh
 	rf.rpcManager = &defaultRaftRPCManager{rf}
 	go rf.ticker()
 
