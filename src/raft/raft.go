@@ -41,7 +41,7 @@ const (
 	// unit: millsecond
 	MinElectionTimeout      = 150
 	MaxElectionTimeout      = 300
-	HeartBeatTimeout        = (MinElectionTimeout / 10) * time.Millisecond
+	HeartBeatTimeout        = ((MaxElectionTimeout + MinElectionTimeout) / 2 / 10) * time.Millisecond
 	ElectionTimeoutInterval = MaxElectionTimeout - MinElectionTimeout
 )
 
