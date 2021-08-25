@@ -69,6 +69,9 @@ type ApplyMsg struct {
 }
 
 type LogEntry struct {
+	Index   int
+	Term    int
+	Command interface{}
 }
 
 //
@@ -94,6 +97,9 @@ type Raft struct {
 	rvChan     chan rvParams
 	applyCh    chan ApplyMsg
 	rpcManager RaftRPCManager
+
+	nextIndex  []int
+	matchIndex []int
 }
 
 // return currentTerm and whether this server
@@ -349,11 +355,24 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 // the leader.
 //
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
-	index := -1
-	term := -1
-	isLeader := true
-
 	// Your code here (2B).
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	isLeader := rf.role == RoleLeader
+	if !isLeader {
+		return -1, -1, false
+	}
+
+	index := rf.log[0].Index + len(rf.log)
+	term := rf.currentTerm
+	ent := LogEntry{
+		Term:    term,
+		Index:   index,
+		Command: command,
+	}
+	rf.log = append(rf.log, ent)
+	rf.nextIndex[rf.me] = index + 1
+	rf.matchIndex[rf.me] = index
 
 	return index, term, isLeader
 }
@@ -704,12 +723,21 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
+	if len(rf.log) == 0 {
+		nullEnt := LogEntry{
+			Index: 0,
+			Term:  0,
+		}
+		rf.log = append(rf.log, nullEnt)
+	}
 
 	// start ticker goroutine to start elections
 	rf.role = RoleFollower
 	rf.hbChan = make(chan hbParams)
 	rf.rvChan = make(chan rvParams)
 	rf.applyCh = applyCh
+	rf.nextIndex = make([]int, len(rf.peers))
+	rf.matchIndex = make([]int, len(rf.peers))
 	rf.rpcManager = &defaultRaftRPCManager{rf}
 	go rf.ticker()
 
