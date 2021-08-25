@@ -406,7 +406,9 @@ func (rf *Raft) ticker() {
 
 		case RoleLeader:
 			rf.mu.Unlock()
-			rf.runLeader(term)
+			sendHBChan := make(chan hbParams)
+			rf.sendHeartbeat(term, sendHBChan, false)
+			rf.runLeader(term, sendHBChan)
 
 		default:
 			panic(fmt.Sprintf("unknown raft role: %s", rf.role))
@@ -558,6 +560,9 @@ WAIT:
 		if rf.currentTerm == term && rf.role == RoleCandidate {
 			DPrintf("candidate %d become leader at term %d", rf.me, rf.currentTerm)
 			rf.role = RoleLeader
+			// send empty heartbeat right away
+			sendHBChan := make(chan hbParams)
+			rf.sendHeartbeat(term, sendHBChan, true)
 		} else {
 			DPrintf("candidate %d not become leader at term %d(vote term %d)", rf.me, rf.currentTerm, term)
 		}
@@ -586,7 +591,8 @@ WAIT:
 	}
 }
 
-func (rf *Raft) sendHeartbeat(term int) {
+func (rf *Raft) sendHeartbeat(term int, sendHBChan chan hbParams, sendEmptyHB bool) {
+	// TODO send empty heart beat
 	for i := range rf.peers {
 		if i == rf.me {
 			continue
@@ -613,26 +619,44 @@ func (rf *Raft) sendHeartbeat(term int) {
 			}
 
 			rf.mu.Lock()
-			defer rf.mu.Unlock()
-			if rf.currentTerm < reply.Term {
+			if rf.currentTerm >= reply.Term {
+				rf.mu.Unlock()
+			} else {
 				rf.role = RoleFollower
 				rf.currentTerm = reply.Term
+				rf.mu.Unlock()
+				params := hbParams{
+					appendEntriesReply: *reply,
+				}
+				select {
+				case sendHBChan <- params:
+				case <-time.After(HeartBeatTimeout):
+					DPrintf("leader %d timeout sending role update msg from %d at term %d, new term is %d", rf.me, server, term, reply.Term)
+				}
 			}
 		}(i, args, reply)
 	}
 }
 
-func (rf *Raft) runLeader(term int) {
+func (rf *Raft) runLeader(term int, sendHBChan chan hbParams) {
 	start := time.Now()
 	to := HeartBeatTimeout
 
 	// send heartbeat
-	go rf.sendHeartbeat(term)
+	// go rf.sendHeartbeat(term)
 
 WAIT:
 	select {
 	case <-time.After(to):
 		// now send heart beat again
+
+	case params := <-sendHBChan:
+		if params.appendEntriesReply.Term > term {
+			return
+		}
+
+		updateTO(&to, start)
+		goto WAIT
 
 	case params := <-rf.hbChan:
 		if params.appendEntriesArgs.Term < term {

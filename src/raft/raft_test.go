@@ -111,7 +111,7 @@ func newTestRaft(numPeers int, term int, role RaftRole) *Raft {
 	return rf
 }
 
-func TestUTRunFollower(t *testing.T) {
+func TestRunFollowerUT(t *testing.T) {
 	// cases:
 	// 1. eto time out, become candidate
 	// 2. receive hb msg from leader
@@ -295,7 +295,7 @@ func TestUTRunFollower(t *testing.T) {
 	}
 }
 
-func TestRunCandidate(t *testing.T) {
+func TestRunCandidateUT(t *testing.T) {
 	// TODO
 	// cases:
 	// 1. eto time out, vote again
@@ -307,7 +307,7 @@ func TestRunCandidate(t *testing.T) {
 	// 7. recieve rv msg and grant vote
 }
 
-func TestRunLeader(t *testing.T) {
+func TestRunLeaderUT(t *testing.T) {
 	// TODO
 	// cases:
 	// 1. hbto time out, send hb again
@@ -318,7 +318,7 @@ func TestRunLeader(t *testing.T) {
 	// 6. recieve rv msg and grant vote
 }
 
-func TestUTAppendEntries(t *testing.T) {
+func TestAppendEntriesUT(t *testing.T) {
 	// cases:
 	//  1. ~~ignore stale request~~
 	//  2. ~~follower handle normal request(should resset election timer)~~
@@ -410,7 +410,7 @@ func TestUTAppendEntries(t *testing.T) {
 	// TODO handle log entry appending
 }
 
-func TestUTRequestVote(t *testing.T) {
+func TestRequestVoteUT(t *testing.T) {
 	// cases:
 	// 1. vote no granted
 	// 	1.1 stale term
@@ -518,7 +518,7 @@ func TestUTRequestVote(t *testing.T) {
 	}
 }
 
-func TestUTStartElection(t *testing.T) {
+func TestStartElectionUT(t *testing.T) {
 	// cases:
 	//  1. win an election
 	//  2. election tie
@@ -618,7 +618,7 @@ func TestUTStartElection(t *testing.T) {
 	}
 }
 
-func TestUTSendHeartbeat(t *testing.T) {
+func TestSendHeartbeatUT(t *testing.T) {
 	// cases:
 	//  1. recieve same term and remain leader
 	//  2. recieve higher term and convert to follower
@@ -670,7 +670,8 @@ func TestUTSendHeartbeat(t *testing.T) {
 		rpcManager := newFakeRaftRPCManager(c.appendReplies, nil)
 		rf.rpcManager = rpcManager
 
-		rf.sendHeartbeat(rf.currentTerm)
+		sendHBChan := make(chan hbParams, 0)
+		rf.sendHeartbeat(rf.currentTerm, sendHBChan, false)
 		// wait for rpc being called
 		time.Sleep(MaxElectionTimeout * time.Millisecond)
 		rpcCount := int(atomic.LoadInt32(&(rpcManager.appendEntriesRPCCount)))
