@@ -762,3 +762,169 @@ func TestCompareLogUT(t *testing.T) {
 		}
 	}
 }
+
+func TestAppendLogUT(t *testing.T) {
+	// cases:
+	// 	1. all match and longer
+	// 	2. all match and shorter
+	//  3. mismatch and longer
+	//  4. mismatch and shorter
+	cases := []struct {
+		name         string
+		prevLogIndex int
+		entries      []LogEntry
+		match        bool
+		size         int
+		rfStatus     *raftStatus
+	}{
+		{
+			name:         "all match and longer",
+			prevLogIndex: 2,
+			entries: []LogEntry{
+				{
+					Index: 3,
+					Term:  4,
+				},
+				{
+					Index: 4,
+					Term:  4,
+				},
+			},
+			match: true,
+			size:  4,
+			rfStatus: &raftStatus{
+				log: []LogEntry{
+					{
+						Index: 1,
+						Term:  2,
+					},
+					{
+						Index: 2,
+						Term:  2,
+					},
+					{
+						Index: 3,
+						Term:  4,
+					},
+				},
+			},
+		},
+		{
+			name:         "all match and shorter",
+			prevLogIndex: 2,
+			entries: []LogEntry{
+				{
+					Index: 3,
+					Term:  4,
+				},
+			},
+			match: true,
+			rfStatus: &raftStatus{
+				log: []LogEntry{
+					{
+						Index: 1,
+						Term:  2,
+					},
+					{
+						Index: 2,
+						Term:  2,
+					},
+					{
+						Index: 3,
+						Term:  4,
+					},
+					{
+						Index: 4,
+						Term:  5,
+					},
+				},
+			},
+			size: 4,
+		},
+		{
+			name:         "mismatch and longer",
+			size:         4,
+			prevLogIndex: 1,
+			entries: []LogEntry{
+				{
+					Index: 2,
+					Term:  3,
+				},
+				{
+					Index: 3,
+					Term:  4,
+				},
+				{
+					Index: 4,
+					Term:  4,
+				},
+			},
+			match: false,
+			rfStatus: &raftStatus{
+				log: []LogEntry{
+					{
+						Index: 1,
+						Term:  2,
+					},
+					{
+						Index: 2,
+						Term:  2,
+					},
+					{
+						Index: 3,
+						Term:  4,
+					},
+				},
+			},
+		},
+		{
+			name:         "mismatch and shorter",
+			size:         3,
+			prevLogIndex: 1,
+			entries: []LogEntry{
+				{
+					Index: 2,
+					Term:  3,
+				},
+				{
+					Index: 3,
+					Term:  4,
+				},
+			},
+			match: false,
+			rfStatus: &raftStatus{
+				log: []LogEntry{
+					{
+						Index: 1,
+						Term:  2,
+					},
+					{
+						Index: 2,
+						Term:  2,
+					},
+					{
+						Index: 3,
+						Term:  4,
+					},
+					{
+						Index: 4,
+						Term:  5,
+					},
+				},
+			},
+		},
+	}
+
+	for _, c := range cases {
+		rf := newTestRaft(c.rfStatus)
+		match := rf.appendLog(c.prevLogIndex, c.entries)
+		if match != c.match {
+			t.Errorf("Error testing %s, expect log match to be %t but got %t", c.name, c.match, match)
+		}
+
+		sz := len(rf.log)
+		if sz != c.size {
+			t.Errorf("Error testing %s, expect log growth to be of size %d but got %d", c.name, c.size, sz)
+		}
+	}
+}

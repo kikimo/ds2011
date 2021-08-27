@@ -320,27 +320,34 @@ func minInt(i, j int) int {
 }
 
 // assume rf.mu lock hold
-// TODO unit test me
-func (rf *Raft) appendLog(prevLogIndex int, offset int, entries []LogEntry) {
-	start := prevLogIndex - offset + 1
-	sz := len(rf.log)
+func (rf *Raft) appendLog(prevLogIndex int, entries []LogEntry) bool {
+	offset := rf.log[0].Index
+	sz := offset + len(rf.log)
+	start := prevLogIndex + 1
+
+	// start reach end of rf.log
 	if start == sz {
 		rf.log = append(rf.log, entries...)
-		return
+		return true
 	}
 
-	esz := len(entries)
+	esz := prevLogIndex + len(entries) + 1
 	end := minInt(sz, esz)
 	for i := start; i < end; i++ {
-		if rf.log[i].Term != entries[i-start].Term {
-			rf.log = append(rf.log[i-1:], entries[i-start:]...)
-			return
+		j := i - start
+		ent := &entries[j]
+		if rf.log[i-offset].Term != ent.Term {
+			// fmt.Printf("mismatch and cut at %dth, j: %d, start: %d\n", i, j, i-offset-1)
+			rf.log = append(rf.log[:i-offset], entries[j:]...)
+			return false
 		}
 	}
 
 	if esz > end {
-		rf.log = append(rf.log, entries[end:]...)
+		rf.log = append(rf.log, entries[end-start:]...)
 	}
+
+	return true
 }
 
 // rpc Implementation
@@ -350,7 +357,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	reply.Term = rf.currentTerm
 	reply.Success = false
 
-	// stale result
+	// stale request
 	if rf.currentTerm > args.Term {
 		rf.mu.Unlock()
 		return
@@ -371,11 +378,12 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	// 如果没有 conflict 的话，必须保留后续的 entry, extreamly import
 	offset := rf.log[0].Index
 	prevLogIndex := args.PrevLogIndex
+	// make sure that prevLogIndex is in the range of rf.log
 	if prevLogIndex-offset < len(rf.log) {
 		ent := rf.log[prevLogIndex-offset]
 		prevLogTerm := ent.Term
 		if prevLogTerm == args.PrevLogTerm {
-			rf.appendLog(prevLogIndex, offset, args.Entries)
+			rf.appendLog(prevLogIndex, args.Entries)
 			if args.LeaderCommit > rf.commitIndex {
 				lastIndex := rf.log[0].Index + len(rf.log)
 				rf.commitIndex = minInt(lastIndex, args.LeaderCommit)
