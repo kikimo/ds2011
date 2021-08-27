@@ -14,6 +14,7 @@ type raftStatus struct {
 	numPeers int
 	term     int
 	votedFor int
+	log      []LogEntry
 	role     RaftRole
 }
 
@@ -81,6 +82,7 @@ func newFakeRaftRPCManager(appendReplies []*testAppendEntriesReply, voteReplies 
 
 func newTestRaft(status *raftStatus) *Raft {
 	rf := &Raft{}
+	rf.log = status.log
 	if len(rf.log) == 0 {
 		nullEnt := LogEntry{
 			Index: 0,
@@ -692,6 +694,71 @@ func TestSendHeartbeatUT(t *testing.T) {
 
 		if isLeader != c.isLeader {
 			t.Errorf("case %s expect raft to be leader %t, but got %t", c.name, c.isLeader, isLeader)
+		}
+	}
+}
+
+func TestCompareLogUT(t *testing.T) {
+	// cases:
+	// 	1. same term, same index
+	//  2. higher term, lower index
+	//  3. lower term, higher index
+	cases := []struct {
+		name         string
+		lastLogIndex int
+		lastLogTerm  int
+		rfStatus     *raftStatus
+		success      bool
+	}{
+		{
+			name:         "same term same index",
+			lastLogTerm:  3,
+			lastLogIndex: 4,
+			rfStatus: &raftStatus{
+				log: []LogEntry{
+					{
+						Term:  3,
+						Index: 4,
+					},
+				},
+			},
+			success: true,
+		},
+		{
+			name:         "higher term lower index",
+			lastLogTerm:  4,
+			lastLogIndex: 3,
+			rfStatus: &raftStatus{
+				log: []LogEntry{
+					{
+						Term:  3,
+						Index: 4,
+					},
+				},
+			},
+			success: true,
+		},
+		{
+			name:         "lower term higher index",
+			lastLogTerm:  2,
+			lastLogIndex: 5,
+			rfStatus: &raftStatus{
+				log: []LogEntry{
+					{
+						Term:  3,
+						Index: 4,
+					},
+				},
+			},
+			success: false,
+		},
+	}
+
+	for _, c := range cases {
+		rf := newTestRaft(c.rfStatus)
+		success := rf.compareLog(c.lastLogTerm, c.lastLogIndex)
+		if success != c.success {
+			t.Errorf("Error testing %s, expect result %t but got %t", c.name, c.success, success)
 		}
 	}
 }
