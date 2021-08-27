@@ -670,8 +670,9 @@ func TestSendHeartbeatUT(t *testing.T) {
 		rpcManager := newFakeRaftRPCManager(c.appendReplies, nil)
 		rf.rpcManager = rpcManager
 
-		sendHBChan := make(chan hbParams, 0)
-		rf.sendHeartbeat(rf.currentTerm, sendHBChan, false)
+		sendHBChan := make(chan hbParams)
+		// TODO test append entries
+		rf.sendHeartbeat(rf.currentTerm, sendHBChan, nil, true)
 		// wait for rpc being called
 		time.Sleep(MaxElectionTimeout * time.Millisecond)
 		rpcCount := int(atomic.LoadInt32(&(rpcManager.appendEntriesRPCCount)))
