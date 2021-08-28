@@ -293,6 +293,7 @@ type AppendEntriesReply struct {
 // assume rf.mu lock hold
 // TODO test me, watch out for log index
 func (rf *Raft) getHBEntries() []*AppendEntriesArgs {
+	DPrintf("log of leader %d at term %d is: %+v, nextIndex: %+v, matchIndex: %+v", rf.me, rf.currentTerm, rf.log, rf.nextIndex, rf.matchIndex)
 	sz := len(rf.peers)
 	entries := make([]*AppendEntriesArgs, sz)
 	for i := 0; i < sz; i++ {
@@ -389,14 +390,18 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	prevLogIndex := args.PrevLogIndex
 	// make sure that prevLogIndex is in the range of rf.log
 	if prevLogIndex-offset < len(rf.log) {
-		ent := rf.log[prevLogIndex-offset]
-		prevLogTerm := ent.Term
+		prevLogTerm := rf.log[prevLogIndex-offset].Term
 		if prevLogTerm == args.PrevLogTerm {
 			rf.appendLog(prevLogIndex, args.Entries)
+			DPrintf("follower %d append log from leader %d at term %d, prevLogIndex %d, entries: %+v, log after append: %+v", rf.me, args.LeaderID, rf.currentTerm, prevLogIndex, args.Entries, rf.log)
 			if args.LeaderCommit > rf.commitIndex {
 				lastIndex := rf.log[0].Index + len(rf.log)
-				rf.commitIndex = minInt(lastIndex, args.LeaderCommit)
-				rf.tryUpdateCommitIndex()
+				newCommitIndex := minInt(lastIndex, args.LeaderCommit)
+				// bug on rf.commitIndex being trunked
+				if newCommitIndex < rf.commitIndex {
+					panic(fmt.Sprintf("%s %d commited entries trunked from %d to %d", rf.role, rf.me, rf.commitIndex, newCommitIndex))
+				}
+				rf.doUpdateCommitIndex(newCommitIndex)
 			}
 
 			reply.Success = true
@@ -508,6 +513,8 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 // should call killed() to check whether it should stop.
 //
 func (rf *Raft) Kill() {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
 	atomic.StoreInt32(&rf.dead, 1)
 	// Your code here, if desired.
 	close(rf.applyCh)
@@ -590,7 +597,7 @@ WAIT:
 			updateTO(&eto, start)
 			goto WAIT
 		}
-		DPrintf("follower %d recieve hb msg from leader %d and return\n", rf.me, params.appendEntriesArgs.LeaderID)
+		DPrintf("follower %d recieve hb msg from leader %d at term %d and return\n", rf.me, params.appendEntriesArgs.LeaderID, term)
 		return
 
 	case params := <-rf.rvChan:
@@ -759,7 +766,7 @@ func (rf *Raft) sendHeartbeat(term int, sendHBChan chan hbParams, appendArgsList
 
 		reply := &AppendEntriesReply{}
 		go func(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) {
-			DPrintf("leader %d sending append entries rpc\n", rf.me)
+			DPrintf("leader %d sending entries %+v to server %d at term %d, send empty: %t\n", rf.me, *args, server, term, sendEmptyHB)
 			ok := rf.rpcManager.SendAppendEntries(server, args, reply)
 			if !ok {
 				return
@@ -829,16 +836,7 @@ func (rf *Raft) sendHeartbeat(term int, sendHBChan chan hbParams, appendArgsList
 }
 
 // assume rf.mu lock hold
-// TODO unit test me
-func (rf *Raft) tryUpdateCommitIndex() {
-	sz := len(rf.matchIndex)
-	matchIndex := make([]int, sz)
-	copy(matchIndex, rf.matchIndex)
-	sort.Slice(matchIndex, func(i, j int) bool {
-		return matchIndex[i] < matchIndex[j]
-	})
-
-	newCommitIndex := matchIndex[sz/2]
+func (rf *Raft) doUpdateCommitIndex(newCommitIndex int) {
 	if newCommitIndex > rf.commitIndex {
 		offset := rf.log[0].Index
 		ent := rf.log[newCommitIndex-offset]
@@ -847,14 +845,32 @@ func (rf *Raft) tryUpdateCommitIndex() {
 			for rf.lastApplied < rf.commitIndex {
 				index := rf.lastApplied + 1
 				msg := ApplyMsg{
+					CommandValid: true,
 					CommandIndex: index,
-					Command:      rf.log[index-offset],
+					Command:      rf.log[index-offset].Command,
 				}
+				DPrintf("server %d applying msg %+v at term %d", rf.me, msg, rf.currentTerm)
 				rf.applyCh <- msg
 				rf.lastApplied++
 			}
 		}
+		DPrintf("server %d updating commit index from %d to %d at term %d, last applied: %d", rf.me, rf.commitIndex, newCommitIndex, rf.currentTerm, rf.lastApplied)
 	}
+}
+
+// assume rf.mu lock hold
+// TODO unit test me
+func (rf *Raft) tryUpdateCommitIndex() {
+	DPrintf("server %d try updating commit index", rf.me)
+	sz := len(rf.matchIndex)
+	matchIndex := make([]int, sz)
+	copy(matchIndex, rf.matchIndex)
+	sort.Slice(matchIndex, func(i, j int) bool {
+		return matchIndex[i] < matchIndex[j]
+	})
+
+	newCommitIndex := matchIndex[sz/2]
+	rf.doUpdateCommitIndex(newCommitIndex)
 }
 
 func (rf *Raft) runLeader(term int, sendHBChan chan hbParams) {
