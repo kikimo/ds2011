@@ -250,11 +250,14 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 			reply.VoteGranted = true
 		}
 	} else if rf.currentTerm == args.Term {
-		if rf.votedFor == 0 && rf.compareLog(args.LastLogIndex, args.LastLogIndex) {
+		if rf.votedFor == 0 && rf.compareLog(args.LastLogTerm, args.LastLogIndex) {
 			reply.VoteGranted = true
 			rf.votedFor = args.CandiateID + 1
 		}
-	} // else if rf.currentTerm > args.Term { /* do nothing */ }
+	} else if rf.currentTerm > args.Term { // ignore stale vote request
+		rf.mu.Unlock()
+		return
+	}
 
 	rf.mu.Unlock()
 	defer func() {
