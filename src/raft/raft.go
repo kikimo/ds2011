@@ -288,6 +288,7 @@ type AppendEntriesReply struct {
 }
 
 // assume rf.mu lock hold
+// TODO test me, watch out for log index
 func (rf *Raft) getHBEntries() []*AppendEntriesArgs {
 	sz := len(rf.peers)
 	entries := make([]*AppendEntriesArgs, sz)
@@ -300,10 +301,14 @@ func (rf *Raft) getHBEntries() []*AppendEntriesArgs {
 		nextIndex := rf.nextIndex[i]
 		prevLogIndex := nextIndex - 1
 		prevLogTerm := rf.log[prevLogIndex-offset].Term
+		logSz := len(rf.log) - nextIndex + offset
+		// logSz := len(rf.log[nextIndex-offset:])
+		log := make([]LogEntry, logSz)
+		copy(log, rf.log[nextIndex-offset:])
 		entries[i] = &AppendEntriesArgs{
 			PrevLogIndex: prevLogIndex,
 			PrevLogTerm:  prevLogTerm,
-			Entries:      rf.log[nextIndex-offset:],
+			Entries:      log,
 			LeaderCommit: rf.commitIndex,
 		}
 	}
@@ -351,6 +356,7 @@ func (rf *Raft) appendLog(prevLogIndex int, entries []LogEntry) bool {
 }
 
 // rpc Implementation
+// TODO bisect optimization
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	rf.mu.Lock()
 	role := rf.role
@@ -529,9 +535,12 @@ func (rf *Raft) ticker() {
 		case RoleCandidate:
 			rf.votedFor = rf.me
 			rf.currentTerm += 1
+			lastLogEnt := rf.log[len(rf.log)-1]
+			lastLogIndex := lastLogEnt.Index
+			lastLogTerm := lastLogEnt.Term
 			rf.mu.Unlock()
 			eto := getElectionTimeout()
-			rf.runCandidate(term+1, eto)
+			rf.runCandidate(term+1, eto, lastLogIndex, lastLogTerm)
 
 		case RoleLeader:
 			argsList := rf.getHBEntries()
@@ -613,7 +622,7 @@ func (r *defaultRaftRPCManager) SendAppendEntries(server int, args *AppendEntrie
 	return r.rf.sendAppendEntries(server, args, reply)
 }
 
-func (rf *Raft) startElection(term int, voteResultChan chan struct{}) {
+func (rf *Raft) startElection(term int, voteResultChan chan struct{}, lastLogIndex int, lastLogTerm int) {
 	// func (rf *Raft) startElection(term int, voteResultChan chan struct{}) {
 	var vote int32 = 1 // one vote from self
 	size := len(rf.peers)
@@ -626,8 +635,8 @@ func (rf *Raft) startElection(term int, voteResultChan chan struct{}) {
 		args := &RequestVoteArgs{
 			CandiateID:   rf.me,
 			Term:         term,
-			LastLogIndex: 0,    // TODO
-			LastLogTerm:  term, // TODO
+			LastLogIndex: lastLogIndex,
+			LastLogTerm:  lastLogTerm,
 		}
 		reply := &RequestVoteReply{}
 		go func(server int, args *RequestVoteArgs, reply *RequestVoteReply) {
@@ -673,12 +682,13 @@ func (rf *Raft) startElection(term int, voteResultChan chan struct{}) {
 	}
 }
 
-func (rf *Raft) runCandidate(term int, eto time.Duration) {
+// TODO unit test me
+func (rf *Raft) runCandidate(term int, eto time.Duration, lastLogIndex int, lastLogTerm int) {
 	start := time.Now()
 	voteResultChan := make(chan struct{})
 
-	// start election
-	go rf.startElection(term, voteResultChan)
+	// TODO split me to ease ut design of runCandidate
+	go rf.startElection(term, voteResultChan, lastLogIndex, lastLogTerm)
 
 WAIT:
 	select {
@@ -817,6 +827,7 @@ func (rf *Raft) sendHeartbeat(term int, sendHBChan chan hbParams, appendArgsList
 }
 
 // assume rf.mu lock hold
+// TODO unit test me
 func (rf *Raft) tryUpdateCommitIndex() {
 	sz := len(rf.matchIndex)
 	matchIndex := make([]int, sz)

@@ -316,10 +316,18 @@ func TestRunLeaderUT(t *testing.T) {
 }
 
 func TestAppendEntriesUT(t *testing.T) {
-	// cases:
-	//  1. ~~ignore stale request~~
-	//  2. ~~follower handle normal request(should resset election timer)~~
-	//  3. ~~candidate handle normal request, update term and convert to follower~~
+	// TODO cases:
+	//  1. ignore stale request and should remain wait
+	//  2. follower handle normal request(should resset election timer)
+	//  3. candidate handle normal request, update term and convert to follower
+	// 	4. follower handle normal request and append log
+	// 	5. follower handle normal request but failed to append log beacause of log mismatch
+	// what to check:
+	// 	1. election timer
+	// 	2. raft role
+	// 	3. raft log
+	// 	4. reply term
+	//	5. reply success
 	cases := []struct {
 		name              string
 		expectedRaftTerm  int
@@ -412,15 +420,16 @@ func TestAppendEntriesUT(t *testing.T) {
 }
 
 func TestRequestVoteUT(t *testing.T) {
-	// cases:
-	// 1. vote no granted
-	// 	1.1 stale term
-	// 	1.2 vote granted to other candidate
-	// 1. vote granted
+	// TODO cases:
+	// 1. stale term vote no granted
+	// 2. vote granted to other candidate
+	// 3. vote no granted beacause log fall behind
+	// 4. vote granted beacause of higher term
+	// 5. vote granted at the same term
 	// what to check
 	//  1. reply term
-	//  2. reply success status
-	//  3. raft term
+	//  2. reply voteGranted
+	//  3. raft currentTerm
 	//  4. raft role
 	cases := []struct {
 		name                     string
@@ -517,10 +526,11 @@ func TestRequestVoteUT(t *testing.T) {
 }
 
 func TestStartElectionUT(t *testing.T) {
-	// cases:
+	// TODO cases:
 	//  1. win an election
 	//  2. election tie
 	//  3. lost an election(recieve higher term and convert to follower)
+	// 	4. TODO loss an election beacause of log behind
 	cases := []struct {
 		name        string
 		rfStatus    *raftStatus
@@ -597,7 +607,10 @@ func TestStartElectionUT(t *testing.T) {
 		rf.rpcManager = rpcManager
 
 		resultChan := make(chan struct{})
-		rf.startElection(rf.currentTerm, resultChan)
+		lastLogEnt := rf.log[len(rf.log)-1]
+		lastLogIndex := lastLogEnt.Index
+		lastLogTerm := lastLogEnt.Term
+		rf.startElection(rf.currentTerm, resultChan, lastLogIndex, lastLogTerm)
 		// time.Sleep(10 * MaxElectionTimeout * time.Millisecond)
 
 		select {
@@ -623,8 +636,9 @@ func TestStartElectionUT(t *testing.T) {
 
 func TestSendHeartbeatUT(t *testing.T) {
 	// cases:
-	//  1. recieve same term and remain leader
+	//  1. recieve same term and remain leader(success)
 	//  2. recieve higher term and convert to follower
+	//  3. TODO sendHeartBeat failed beacause of log mismatch
 	cases := []struct {
 		name          string
 		rfStatus      *raftStatus
