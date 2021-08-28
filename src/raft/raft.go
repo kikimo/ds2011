@@ -18,14 +18,32 @@ package raft
 //
 
 import (
-//	"bytes"
+	//	"bytes"
+	"fmt"
+	"math/rand"
 	"sync"
 	"sync/atomic"
+	"time"
 
-//	"6.824/labgob"
+	//	"6.824/labgob"
 	"6.824/labrpc"
 )
 
+type RaftRole string
+
+const (
+	RoleFollower  RaftRole = "follower"
+	RoleCandidate RaftRole = "candidate"
+	RoleLeader    RaftRole = "leader"
+)
+
+const (
+	// unit: millsecond
+	MinElectionTimeout      = 150
+	MaxElectionTimeout      = 300
+	HeartBeatTimeout        = ((MaxElectionTimeout + MinElectionTimeout) / 2 / 10) * time.Millisecond
+	ElectionTimeoutInterval = MaxElectionTimeout - MinElectionTimeout
+)
 
 //
 // as each Raft peer becomes aware that successive log entries are
@@ -50,6 +68,9 @@ type ApplyMsg struct {
 	SnapshotIndex int
 }
 
+type LogEntry struct {
+}
+
 //
 // A Go object implementing a single Raft peer.
 //
@@ -63,7 +84,16 @@ type Raft struct {
 	// Your data here (2A, 2B, 2C).
 	// Look at the paper's Figure 2 for a description of what
 	// state a Raft server must maintain.
+	currentTerm int
+	votedFor    int
+	log         []LogEntry
 
+	// non-persistant field
+	role       RaftRole
+	hbChan     chan hbParams
+	rvChan     chan rvParams
+	applyCh    chan ApplyMsg
+	rpcManager RaftRPCManager
 }
 
 // return currentTerm and whether this server
@@ -73,6 +103,11 @@ func (rf *Raft) GetState() (int, bool) {
 	var term int
 	var isleader bool
 	// Your code here (2A).
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	term = rf.currentTerm
+	isleader = rf.role == RoleLeader
+
 	return term, isleader
 }
 
@@ -91,7 +126,6 @@ func (rf *Raft) persist() {
 	// data := w.Bytes()
 	// rf.persister.SaveRaftState(data)
 }
-
 
 //
 // restore previously persisted state.
@@ -115,7 +149,6 @@ func (rf *Raft) readPersist(data []byte) {
 	// }
 }
 
-
 //
 // A service wants to switch to snapshot.  Only do so if Raft hasn't
 // have more recent info since it communicate the snapshot on applyCh.
@@ -136,13 +169,16 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 
 }
 
-
 //
 // example RequestVote RPC arguments structure.
 // field names must start with capital letters!
 //
 type RequestVoteArgs struct {
 	// Your data here (2A, 2B).
+	CandiateID   int
+	Term         int
+	LastLogIndex int
+	LastLogTerm  int
 }
 
 //
@@ -151,6 +187,18 @@ type RequestVoteArgs struct {
 //
 type RequestVoteReply struct {
 	// Your data here (2A).
+	Term        int
+	VoteGranted bool
+}
+
+type rvParams struct {
+	requestVoteArgs  RequestVoteArgs
+	requestVoteReply RequestVoteReply
+}
+
+type hbParams struct {
+	appendEntriesArgs  AppendEntriesArgs
+	appendEntriesReply AppendEntriesReply
 }
 
 //
@@ -158,6 +206,93 @@ type RequestVoteReply struct {
 //
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
+	rf.mu.Lock()
+	term := rf.currentTerm
+	role := rf.role
+	reply.Term = term
+	reply.VoteGranted = false
+
+	// no vote granted
+	if term > args.Term || (term == args.Term && rf.votedFor != 0) {
+		rf.mu.Unlock()
+		return
+	}
+
+	rf.role = RoleFollower
+	rf.currentTerm = args.Term
+	rf.votedFor = args.CandiateID + 1
+	reply.VoteGranted = true
+	rf.mu.Unlock()
+
+	defer func() {
+		params := rvParams{
+			requestVoteArgs:  *args,
+			requestVoteReply: *reply,
+		}
+
+		go func() {
+			select {
+			case rf.rvChan <- params:
+			case <-time.After(HeartBeatTimeout):
+				DPrintf("%s %d timeout sending request vote result at term %d", role, rf.me, term)
+			}
+		}()
+	}()
+}
+
+type AppendEntriesArgs struct {
+	Term         int
+	LeaderID     int
+	PrevLogIndex int
+	PrevLogTerm  int
+	Entries      []LogEntry
+	LeaderCommit int
+}
+
+type AppendEntriesReply struct {
+	Success bool
+	Term    int
+}
+
+// rpc Implementation
+func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
+	rf.mu.Lock()
+	term := rf.currentTerm
+	role := rf.role
+	reply.Term = term
+
+	// stale result
+	if term > args.Term {
+		reply.Success = false
+		rf.mu.Unlock()
+		return
+	}
+
+	// update currentTerm and convert to follower
+	if term < args.Term {
+		rf.currentTerm = args.Term
+		rf.role = RoleFollower
+	}
+
+	defer func() {
+		params := hbParams{
+			appendEntriesArgs:  *args,
+			appendEntriesReply: *reply,
+		}
+
+		go func() {
+			select {
+			case rf.hbChan <- params:
+			case <-time.After(HeartBeatTimeout):
+				DPrintf("%s %d timeout sending heartbeat result at term %d", role, rf.me, term)
+			}
+		}()
+	}()
+
+	// a leagal heartbeat msg
+	// TODO append entries
+	reply.Success = true
+	rf.mu.Unlock()
 }
 
 //
@@ -194,6 +329,10 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 	return ok
 }
 
+func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
+	ok := rf.peers[server].Call("Raft.AppendEntries", args, reply)
+	return ok
+}
 
 //
 // the service using Raft (e.g. a k/v server) wants to start
@@ -216,7 +355,6 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 
 	// Your code here (2B).
 
-
 	return index, term, isLeader
 }
 
@@ -234,6 +372,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 func (rf *Raft) Kill() {
 	atomic.StoreInt32(&rf.dead, 1)
 	// Your code here, if desired.
+	close(rf.applyCh)
 }
 
 func (rf *Raft) killed() bool {
@@ -244,12 +383,302 @@ func (rf *Raft) killed() bool {
 // The ticker go routine starts a new election if this peer hasn't received
 // heartsbeats recently.
 func (rf *Raft) ticker() {
-	for rf.killed() == false {
+	for !rf.killed() {
+		rf.mu.Lock()
+		role := rf.role
+		term := rf.currentTerm
 
 		// Your code here to check if a leader election should
 		// be started and to randomize sleeping time using
 		// time.Sleep().
+		switch role {
+		case RoleFollower:
+			rf.mu.Unlock()
+			eto := getElectionTimeout()
+			rf.runFollower(term, eto)
 
+		case RoleCandidate:
+			rf.votedFor = rf.me
+			rf.currentTerm += 1
+			rf.mu.Unlock()
+			eto := getElectionTimeout()
+			rf.runCandidate(term+1, eto)
+
+		case RoleLeader:
+			rf.mu.Unlock()
+			sendHBChan := make(chan hbParams)
+			rf.sendHeartbeat(term, sendHBChan, false)
+			rf.runLeader(term, sendHBChan)
+
+		default:
+			panic(fmt.Sprintf("unknown raft role: %s", rf.role))
+		}
+	}
+}
+
+func getElectionTimeout() time.Duration {
+	return time.Duration(rand.Intn(ElectionTimeoutInterval)+MinElectionTimeout) * time.Millisecond
+}
+
+// update time out by:
+// to = to - (time.Now() - start)
+func updateTO(to *time.Duration, start time.Time) {
+	*to -= time.Since(start)
+}
+
+func (rf *Raft) runFollower(term int, eto time.Duration) {
+	start := time.Now()
+
+WAIT:
+	select {
+	case <-time.After(eto):
+		rf.mu.Lock()
+		defer rf.mu.Unlock()
+		if rf.currentTerm == term && rf.role == RoleFollower {
+			rf.role = RoleCandidate
+		}
+
+	case params := <-rf.hbChan:
+		// stale hb msg
+		if params.appendEntriesArgs.Term < term {
+			DPrintf("follower %d recieve stale hb msg at term %d: %+v", rf.me, term, params)
+			updateTO(&eto, start)
+			goto WAIT
+		}
+		DPrintf("follower %d recieve hb msg from leader %d and return\n", rf.me, params.appendEntriesArgs.LeaderID)
+		return
+
+	case params := <-rf.rvChan:
+		// stale request vote msg
+		DPrintf("follower %d recieve rv param from %d: %+v\n", rf.me, params.requestVoteArgs.CandiateID, params)
+		if params.requestVoteArgs.Term < term {
+			DPrintf("follower %d recieve stale request vote msg at term %d: %+v", rf.me, term, params)
+			updateTO(&eto, start)
+			goto WAIT
+		}
+
+		// vote not granted
+		if !params.requestVoteReply.VoteGranted {
+			DPrintf("follower %d recieve request vote msg at term %d, but vote not granted: %+v", rf.me, term, params)
+			updateTO(&eto, start)
+			goto WAIT
+		}
+	}
+}
+
+type RaftRPCManager interface {
+	SendRequestVote(server int, args *RequestVoteArgs, reply *RequestVoteReply) bool
+	SendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool
+}
+
+type defaultRaftRPCManager struct {
+	rf *Raft
+}
+
+func (r *defaultRaftRPCManager) SendRequestVote(server int, args *RequestVoteArgs, reply *RequestVoteReply) bool {
+	return r.rf.sendRequestVote(server, args, reply)
+}
+
+func (r *defaultRaftRPCManager) SendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
+	return r.rf.sendAppendEntries(server, args, reply)
+}
+
+func (rf *Raft) startElection(term int, voteResultChan chan struct{}) {
+	// func (rf *Raft) startElection(term int, voteResultChan chan struct{}) {
+	var vote int32 = 1 // one vote from self
+	size := len(rf.peers)
+
+	for i := range rf.peers {
+		if i == rf.me {
+			continue
+		}
+
+		args := &RequestVoteArgs{
+			CandiateID:   rf.me,
+			Term:         term,
+			LastLogIndex: 0,    // TODO
+			LastLogTerm:  term, // TODO
+		}
+		reply := &RequestVoteReply{}
+		go func(server int, args *RequestVoteArgs, reply *RequestVoteReply) {
+			DPrintf("candidate %d sending vote request to %d at term %d: %+v", rf.me, server, term, *args)
+			ok := rf.rpcManager.SendRequestVote(server, args, reply)
+			if !ok {
+				return
+			}
+			DPrintf("candidate %d recieve vote result from %d: %+v", rf.me, server, *reply)
+
+			if !reply.VoteGranted {
+				DPrintf("candidate %d failed to get vote from %d at term %d", rf.me, server, term)
+				if reply.Term <= term {
+					return
+				}
+
+				rf.mu.Lock()
+				defer rf.mu.Unlock()
+
+				if rf.currentTerm < reply.Term {
+					DPrintf("candidate %d convert to follower and update term from %d to %d", rf.me, rf.currentTerm, reply.Term)
+					rf.currentTerm = reply.Term
+					rf.role = RoleFollower
+				}
+
+				return
+			}
+
+			// check if we win the vote
+			atomic.AddInt32(&vote, 1)
+			votedGranted := atomic.LoadInt32(&vote)
+			if votedGranted > int32((size / 2)) {
+				select {
+				case voteResultChan <- struct{}{}:
+					DPrintf("candidate %d successful election result sent at term %d", rf.me, term)
+
+				case <-time.After(HeartBeatTimeout):
+					DPrintf("candidate %d timeout sending successful election result at term %d", rf.me, term)
+				}
+			}
+		}(i, args, reply)
+	}
+}
+
+func (rf *Raft) runCandidate(term int, eto time.Duration) {
+	start := time.Now()
+	voteResultChan := make(chan struct{})
+
+	// start election
+	go rf.startElection(term, voteResultChan)
+
+WAIT:
+	select {
+	case <-time.After(eto):
+		// timeout without result, begin another election
+	case <-voteResultChan:
+		// else we are leader now
+		rf.mu.Lock()
+		defer rf.mu.Unlock()
+		if rf.currentTerm == term && rf.role == RoleCandidate {
+			DPrintf("candidate %d become leader at term %d", rf.me, rf.currentTerm)
+			rf.role = RoleLeader
+			// send empty heartbeat right away
+			sendHBChan := make(chan hbParams)
+			rf.sendHeartbeat(term, sendHBChan, true)
+		} else {
+			DPrintf("candidate %d not become leader at term %d(vote term %d)", rf.me, rf.currentTerm, term)
+		}
+
+	case params := <-rf.hbChan:
+		if params.appendEntriesArgs.Term < term {
+			DPrintf("candidate %d recieve stale hb msg at term %d: %+v", rf.me, term, params)
+			updateTO(&eto, start)
+			goto WAIT
+		}
+
+	case params := <-rf.rvChan:
+		// stale request vote msg
+		if params.requestVoteArgs.Term < term {
+			DPrintf("candidate %d recieve stale request vote msg at term %d: %+v", rf.me, term, params)
+			updateTO(&eto, start)
+			goto WAIT
+		}
+
+		// vote not granted
+		if !params.requestVoteReply.VoteGranted {
+			DPrintf("candidate %d recieve request vote msg at term %d, but vote not granted: %+v", rf.me, term, params)
+			updateTO(&eto, start)
+			goto WAIT
+		}
+	}
+}
+
+func (rf *Raft) sendHeartbeat(term int, sendHBChan chan hbParams, sendEmptyHB bool) {
+	// TODO send empty heart beat
+	for i := range rf.peers {
+		if i == rf.me {
+			continue
+		}
+
+		args := &AppendEntriesArgs{
+			Term:         term,
+			LeaderID:     rf.me,
+			PrevLogIndex: 0,   // TODO
+			PrevLogTerm:  0,   // TODO
+			Entries:      nil, // TODO
+			LeaderCommit: 0,   // TODO
+		}
+		reply := &AppendEntriesReply{}
+		go func(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) {
+			DPrintf("leader %d sending append entries rpc\n", rf.me)
+			ok := rf.rpcManager.SendAppendEntries(server, args, reply)
+			if !ok {
+				return
+			}
+
+			if reply.Success || reply.Term <= term {
+				return
+			}
+
+			rf.mu.Lock()
+			if rf.currentTerm >= reply.Term {
+				rf.mu.Unlock()
+			} else {
+				rf.role = RoleFollower
+				rf.currentTerm = reply.Term
+				rf.mu.Unlock()
+				params := hbParams{
+					appendEntriesReply: *reply,
+				}
+				select {
+				case sendHBChan <- params:
+				case <-time.After(HeartBeatTimeout):
+					DPrintf("leader %d timeout sending role update msg from %d at term %d, new term is %d", rf.me, server, term, reply.Term)
+				}
+			}
+		}(i, args, reply)
+	}
+}
+
+func (rf *Raft) runLeader(term int, sendHBChan chan hbParams) {
+	start := time.Now()
+	to := HeartBeatTimeout
+
+	// send heartbeat
+	// go rf.sendHeartbeat(term)
+
+WAIT:
+	select {
+	case <-time.After(to):
+		// now send heart beat again
+
+	case params := <-sendHBChan:
+		if params.appendEntriesReply.Term > term {
+			return
+		}
+
+		updateTO(&to, start)
+		goto WAIT
+
+	case params := <-rf.hbChan:
+		if params.appendEntriesArgs.Term < term {
+			DPrintf("leader %d recieve stale hb msg at term %d: %+v", rf.me, term, params)
+			updateTO(&to, start)
+			goto WAIT
+		}
+
+	case params := <-rf.rvChan:
+		// stale request vote msg
+		if params.requestVoteArgs.Term < term {
+			DPrintf("leader %d recieve stale request vote msg at term %d: %+v", rf.me, term, params)
+			updateTO(&to, start)
+			goto WAIT
+		}
+
+		// vote not granted
+		if !params.requestVoteReply.VoteGranted {
+			DPrintf("leader %d recieve request vote msg at term %d, but vote not granted: %+v", rf.me, term, params)
+			updateTO(&to, start)
+			goto WAIT
+		}
 	}
 }
 
@@ -277,8 +706,12 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.readPersist(persister.ReadRaftState())
 
 	// start ticker goroutine to start elections
+	rf.role = RoleFollower
+	rf.hbChan = make(chan hbParams)
+	rf.rvChan = make(chan rvParams)
+	rf.applyCh = applyCh
+	rf.rpcManager = &defaultRaftRPCManager{rf}
 	go rf.ticker()
-
 
 	return rf
 }
