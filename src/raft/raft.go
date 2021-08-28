@@ -534,13 +534,16 @@ func (rf *Raft) ticker() {
 
 		case RoleCandidate:
 			rf.votedFor = rf.me
-			rf.currentTerm += 1
+			rf.currentTerm++
 			lastLogEnt := rf.log[len(rf.log)-1]
 			lastLogIndex := lastLogEnt.Index
 			lastLogTerm := lastLogEnt.Term
 			rf.mu.Unlock()
+			term++
 			eto := getElectionTimeout()
-			rf.runCandidate(term+1, eto, lastLogIndex, lastLogTerm)
+			voteChan := make(chan struct{})
+			go rf.startElection(term, voteChan, lastLogIndex, lastLogTerm)
+			rf.runCandidate(term, eto, voteChan)
 
 		case RoleLeader:
 			argsList := rf.getHBEntries()
@@ -683,18 +686,14 @@ func (rf *Raft) startElection(term int, voteResultChan chan struct{}, lastLogInd
 }
 
 // TODO unit test me
-func (rf *Raft) runCandidate(term int, eto time.Duration, lastLogIndex int, lastLogTerm int) {
+func (rf *Raft) runCandidate(term int, eto time.Duration, voteChan chan struct{}) {
 	start := time.Now()
-	voteResultChan := make(chan struct{})
-
-	// TODO split me to ease ut design of runCandidate
-	go rf.startElection(term, voteResultChan, lastLogIndex, lastLogTerm)
 
 WAIT:
 	select {
 	case <-time.After(eto):
 		// timeout without result, begin another election
-	case <-voteResultChan:
+	case <-voteChan:
 		// else we are leader now
 		rf.mu.Lock()
 		if rf.currentTerm == term && rf.role == RoleCandidate {
