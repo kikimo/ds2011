@@ -378,6 +378,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 	// stale request
 	if rf.currentTerm > args.Term {
+		DPrintf("append entries failed for follower %d because of stale term %d: %+v", rf.me, rf.currentTerm, *args)
 		rf.mu.Unlock()
 		return
 	}
@@ -414,7 +415,11 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			}
 
 			reply.Success = true
+		} else {
+			DPrintf("follower %d failed appending log beacause log term mismatch, log size %+v, prevLogIndex %d", rf.me, rf.log, prevLogIndex)
 		}
+	} else {
+		DPrintf("follower %d failed appending log beacause log index mismatch, log size %d, prevLogIndex %d", rf.me, len(rf.log)+offset, prevLogIndex)
 	}
 
 	rf.mu.Unlock()
@@ -842,6 +847,8 @@ func (rf *Raft) sendHeartbeat(term int, sendHBChan chan hbParams, appendArgsList
 				// TODO optimize index matching algorithm
 				if rf.nextIndex[server] == args.PrevLogIndex+1 {
 					rf.nextIndex[server]--
+				} else {
+					DPrintf("leader %d failed to update nextIndex of %d beacause of mismatch, rf.nextIndex[server] %d, prevLogIndex %d", rf.me, server, rf.nextIndex[server], args.PrevLogIndex)
 				}
 				rf.mu.Unlock()
 			}
