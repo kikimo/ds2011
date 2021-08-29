@@ -48,6 +48,9 @@ const (
 	// LeaderIdlePeriod        = ((MaxElectionTimeout + MinElectionTimeout) / 2 / 10) * time.Millisecond
 	LeaderIdlePeriod        = 64 * time.Millisecond
 	ElectionTimeoutInterval = MaxElectionTimeout - MinElectionTimeout
+
+	// note: setting leader idle period equal to election time will greatly
+	// ease the detection raft bug
 )
 
 //
@@ -252,11 +255,13 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		if rf.compareLog(args.LastLogTerm, args.LastLogIndex) {
 			rf.votedFor = args.CandiateID + 1
 			reply.VoteGranted = true
+			DPrintf("follower %d grant vote to %d at term %d", rf.me, args.CandiateID, rf.me)
 		}
 	} else if rf.currentTerm == args.Term {
 		if rf.votedFor == 0 && rf.compareLog(args.LastLogTerm, args.LastLogIndex) {
 			reply.VoteGranted = true
 			rf.votedFor = args.CandiateID + 1
+			DPrintf("follower %d grant vote to %d at term %d", rf.me, args.CandiateID, rf.me)
 		}
 	} else if rf.currentTerm > args.Term { // ignore stale vote request
 		rf.mu.Unlock()
@@ -547,7 +552,7 @@ func (rf *Raft) ticker() {
 			rf.runFollower(term, eto)
 
 		case RoleCandidate:
-			rf.votedFor = rf.me
+			rf.votedFor = rf.me + 1
 			rf.currentTerm++
 			lastLogEnt := rf.log[len(rf.log)-1]
 			lastLogIndex := lastLogEnt.Index
@@ -574,6 +579,7 @@ func (rf *Raft) ticker() {
 
 func getElectionTimeout() time.Duration {
 	return time.Duration(rand.Intn(ElectionTimeoutInterval)+MinElectionTimeout) * time.Millisecond
+	// return MinElectionTimeout * time.Millisecond
 }
 
 // update time out by:
@@ -662,7 +668,7 @@ func (rf *Raft) startElection(term int, voteResultChan chan struct{}, lastLogInd
 			if !ok {
 				return
 			}
-			DPrintf("candidate %d recieve vote result from %d: %+v", rf.me, server, *reply)
+			DPrintf("candidate %d recieve vote result from %d: %+v at term %d", rf.me, server, *reply, term)
 
 			if !reply.VoteGranted {
 				DPrintf("candidate %d failed to get vote from %d at term %d", rf.me, server, term)
