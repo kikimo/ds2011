@@ -258,6 +258,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 			DPrintf("follower %d grant vote to %d at term %d", rf.me, args.CandiateID, rf.me)
 		}
 	} else if rf.currentTerm == args.Term {
+		DPrintf("server %d comparing log %+v with lastLogTerm %d, lastLogIndex %d", rf.me, rf.log, args.LastLogTerm, args.LastLogIndex)
 		if rf.votedFor == 0 && rf.compareLog(args.LastLogTerm, args.LastLogIndex) {
 			reply.VoteGranted = true
 			rf.votedFor = args.CandiateID + 1
@@ -370,6 +371,7 @@ func (rf *Raft) appendLog(prevLogIndex int, entries []LogEntry) bool {
 
 // rpc Implementation
 // TODO bisect optimization
+// TODO add case index mismatch, should reset election timer
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	rf.mu.Lock()
 	role := rf.role
@@ -557,6 +559,8 @@ func (rf *Raft) ticker() {
 			rf.runFollower(term, eto)
 
 		case RoleCandidate:
+			start := time.Now()
+			eto := getElectionTimeout()
 			rf.votedFor = rf.me + 1
 			rf.currentTerm++
 			lastLogEnt := rf.log[len(rf.log)-1]
@@ -564,10 +568,9 @@ func (rf *Raft) ticker() {
 			lastLogTerm := lastLogEnt.Term
 			rf.mu.Unlock()
 			term++
-			eto := getElectionTimeout()
 			voteChan := make(chan struct{})
 			go rf.startElection(term, voteChan, lastLogIndex, lastLogTerm)
-			rf.runCandidate(term, eto, voteChan)
+			rf.runCandidate(term, start, eto, voteChan)
 
 		case RoleLeader:
 			argsList := rf.getHBEntries()
@@ -599,11 +602,13 @@ func (rf *Raft) runFollower(term int, eto time.Duration) {
 WAIT:
 	select {
 	case <-time.After(eto):
+		// TODO add new unit test:
+		// a follower will convert to candidate despite its term has been
+		// updated
 		rf.mu.Lock()
-		defer rf.mu.Unlock()
-		if rf.currentTerm == term && rf.role == RoleFollower {
-			rf.role = RoleCandidate
-		}
+		// we don't care about the term and role now
+		rf.role = RoleCandidate
+		rf.mu.Unlock()
 
 	case params := <-rf.hbChan:
 		// stale hb msg
@@ -714,8 +719,8 @@ func (rf *Raft) startElection(term int, voteResultChan chan struct{}, lastLogInd
 }
 
 // TODO unit test me
-func (rf *Raft) runCandidate(term int, eto time.Duration, voteChan chan struct{}) {
-	start := time.Now()
+func (rf *Raft) runCandidate(term int, start time.Time, eto time.Duration, voteChan chan struct{}) {
+	// start := time.Now()
 
 WAIT:
 	select {
@@ -860,25 +865,23 @@ func (rf *Raft) sendHeartbeat(term int, sendHBChan chan hbParams, appendArgsList
 func (rf *Raft) doUpdateCommitIndex(newCommitIndex int) {
 	if newCommitIndex > rf.commitIndex {
 		offset := rf.log[0].Index
-		ent := rf.log[newCommitIndex-offset]
-		if ent.Term == rf.currentTerm {
-			rf.commitIndex = newCommitIndex
-			for rf.lastApplied < rf.commitIndex {
-				index := rf.lastApplied + 1
-				msg := ApplyMsg{
-					CommandValid: true,
-					CommandIndex: index,
-					Command:      rf.log[index-offset].Command,
-				}
-				DPrintf("server %d applying msg %+v at term %d", rf.me, msg, rf.currentTerm)
-				rf.applyCh <- msg
-				rf.lastApplied++
+		rf.commitIndex = newCommitIndex
+		for rf.lastApplied < rf.commitIndex {
+			index := rf.lastApplied + 1
+			msg := ApplyMsg{
+				CommandValid: true,
+				CommandIndex: index,
+				Command:      rf.log[index-offset].Command,
 			}
+			DPrintf("server %d applying msg %+v at term %d", rf.me, msg, rf.currentTerm)
+			rf.applyCh <- msg
+			rf.lastApplied++
 		}
 		DPrintf("server %d updating commit index from %d to %d at term %d, last applied: %d", rf.me, rf.commitIndex, newCommitIndex, rf.currentTerm, rf.lastApplied)
 	}
 }
 
+// call by leader
 // assume rf.mu lock hold
 // TODO unit test me
 func (rf *Raft) tryUpdateCommitIndex() {
@@ -891,7 +894,12 @@ func (rf *Raft) tryUpdateCommitIndex() {
 	})
 
 	newCommitIndex := matchIndex[sz/2]
-	rf.doUpdateCommitIndex(newCommitIndex)
+	offset := rf.log[0].Index
+	ent := rf.log[newCommitIndex-offset]
+	// leader only commit log from current term
+	if ent.Term == rf.currentTerm {
+		rf.doUpdateCommitIndex(newCommitIndex)
+	}
 }
 
 func (rf *Raft) runLeader(term int, sendHBChan chan hbParams) {
@@ -966,6 +974,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 			Term:  0,
 		}
 		rf.log = append(rf.log, nullEnt)
+		rf.persist()
 	}
 
 	// start ticker goroutine to start elections
