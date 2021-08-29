@@ -40,9 +40,13 @@ const (
 
 const (
 	// unit: millsecond
-	MinElectionTimeout      = 150
-	MaxElectionTimeout      = 300
-	HeartBeatTimeout        = ((MaxElectionTimeout + MinElectionTimeout) / 2 / 10) * time.Millisecond
+	MinElectionTimeout = 150
+	MaxElectionTimeout = 300
+	// the paper suggest idle period to be a magnitude small than election timeout
+	// but the test limits us to send no more than 10 AppendEntries per second, setting
+	// so we set idle period to 64ms(more than 10 AppendEntries per second, but it works).
+	// LeaderIdlePeriod        = ((MaxElectionTimeout + MinElectionTimeout) / 2 / 10) * time.Millisecond
+	LeaderIdlePeriod        = 64 * time.Millisecond
 	ElectionTimeoutInterval = MaxElectionTimeout - MinElectionTimeout
 )
 
@@ -269,7 +273,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		go func() {
 			select {
 			case rf.rvChan <- params:
-			case <-time.After(HeartBeatTimeout):
+			case <-time.After(MinElectionTimeout * time.Millisecond):
 				DPrintf("%s %d timeout sending request vote result at term %d", role, rf.me, term)
 			}
 		}()
@@ -418,7 +422,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		go func() {
 			select {
 			case rf.hbChan <- params:
-			case <-time.After(HeartBeatTimeout):
+			case <-time.After(MinElectionTimeout * time.Millisecond):
 				DPrintf("%s %d timeout sending heartbeat result at term %d", role, rf.me, reply.Term)
 			}
 		}()
@@ -669,11 +673,14 @@ func (rf *Raft) startElection(term int, voteResultChan chan struct{}, lastLogInd
 				rf.mu.Lock()
 				defer rf.mu.Unlock()
 
-				if rf.currentTerm < reply.Term {
-					DPrintf("candidate %d convert to follower and update term from %d to %d", rf.me, rf.currentTerm, reply.Term)
-					rf.currentTerm = reply.Term
-					rf.role = RoleFollower
-					rf.votedFor = 0
+				if reply.Term > term {
+					// double check on currentTerm, beacause it might have been changed by other rpc
+					if reply.Term > rf.currentTerm {
+						DPrintf("candidate %d convert to follower and update term from %d to %d", rf.me, rf.currentTerm, reply.Term)
+						rf.currentTerm = reply.Term
+						rf.role = RoleFollower
+						rf.votedFor = 0
+					}
 				}
 
 				return
@@ -687,7 +694,7 @@ func (rf *Raft) startElection(term int, voteResultChan chan struct{}, lastLogInd
 				case voteResultChan <- struct{}{}:
 					DPrintf("candidate %d successful election result sent at term %d", rf.me, term)
 
-				case <-time.After(HeartBeatTimeout):
+				case <-time.After(MinElectionTimeout * time.Millisecond):
 					DPrintf("candidate %d timeout sending successful election result at term %d", rf.me, term)
 				}
 			}
@@ -765,6 +772,7 @@ func (rf *Raft) sendHeartbeat(term int, sendHBChan chan hbParams, appendArgsList
 		args.LeaderID = rf.me
 
 		reply := &AppendEntriesReply{}
+		// TODO extract and unit test me, important
 		go func(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) {
 			DPrintf("leader %d sending entries %+v to server %d at term %d, send empty: %t\n", rf.me, *args, server, term, sendEmptyHB)
 			ok := rf.rpcManager.SendAppendEntries(server, args, reply)
@@ -781,7 +789,7 @@ func (rf *Raft) sendHeartbeat(term int, sendHBChan chan hbParams, appendArgsList
 
 				select {
 				case sendHBChan <- params:
-				case <-time.After(HeartBeatTimeout):
+				case <-time.After(MinElectionTimeout * time.Millisecond):
 					DPrintf("leader %d timeout sending role update msg from %d at term %d, new term is %d", rf.me, server, term, reply.Term)
 				}
 
@@ -800,7 +808,7 @@ func (rf *Raft) sendHeartbeat(term int, sendHBChan chan hbParams, appendArgsList
 
 				select {
 				case sendHBChan <- params:
-				case <-time.After(HeartBeatTimeout):
+				case <-time.After(MinElectionTimeout * time.Millisecond):
 					DPrintf("leader %d timeout sending role update msg from %d at term %d, new term is %d", rf.me, server, term, reply.Term)
 				}
 
@@ -829,7 +837,7 @@ func (rf *Raft) sendHeartbeat(term int, sendHBChan chan hbParams, appendArgsList
 				if rf.nextIndex[server] == args.PrevLogIndex+1 {
 					rf.nextIndex[server]--
 				}
-				rf.mu.Lock()
+				rf.mu.Unlock()
 			}
 		}(i, args, reply)
 	}
@@ -875,7 +883,7 @@ func (rf *Raft) tryUpdateCommitIndex() {
 
 func (rf *Raft) runLeader(term int, sendHBChan chan hbParams) {
 	start := time.Now()
-	to := HeartBeatTimeout
+	to := LeaderIdlePeriod
 
 	// send heartbeat
 	// go rf.sendHeartbeat(term)

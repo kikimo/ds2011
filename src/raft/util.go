@@ -11,3 +11,7 @@ func DPrintf(format string, a ...interface{}) (n int, err error) {
 	}
 	return
 }
+
+func init() {
+	log.SetFlags(log.Ldate | log.Lmicroseconds)
+}
