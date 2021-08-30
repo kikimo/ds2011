@@ -386,12 +386,15 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	}
 
 	// update currentTerm and convert to follower
+	// TODO if currentTerm == args.Term and role is candidate
+	// we should convert it to follower
+	// TODO add unit test to cover this situation
 	if rf.currentTerm < args.Term {
 		rf.currentTerm = args.Term
-		if rf.role != RoleFollower {
-			rf.role = RoleFollower
-			rf.votedFor = 0
-		}
+	}
+
+	if rf.role != RoleFollower {
+		rf.role = RoleFollower
 	}
 
 	// handle stale entries, very tricky
