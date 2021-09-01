@@ -326,6 +326,7 @@ func (rf *Raft) getHBEntries() []*AppendEntriesArgs {
 			LeaderCommit: rf.commitIndex,
 		}
 	}
+	DPrintf("leader %d finish preparing append entries at term %d", rf.me, rf.currentTerm)
 
 	return entries
 }
@@ -576,11 +577,13 @@ func (rf *Raft) ticker() {
 			rf.runCandidate(term, start, eto, voteChan)
 
 		case RoleLeader:
+			start := time.Now()
+			to := LeaderIdlePeriod
 			argsList := rf.getHBEntries()
 			rf.mu.Unlock()
 			sendHBChan := make(chan hbParams)
-			rf.sendHeartbeat(term, sendHBChan, argsList, false)
-			rf.runLeader(term, sendHBChan)
+			go rf.sendHeartbeat(term, sendHBChan, argsList, false)
+			rf.runLeader(term, start, to, sendHBChan)
 
 		default:
 			panic(fmt.Sprintf("unknown raft role: %s", rf.role))
@@ -724,6 +727,7 @@ func (rf *Raft) startElection(term int, voteResultChan chan struct{}, lastLogInd
 // TODO unit test me
 func (rf *Raft) runCandidate(term int, start time.Time, eto time.Duration, voteChan chan struct{}) {
 	// start := time.Now()
+	updateTO(&eto, start)
 
 WAIT:
 	select {
@@ -905,10 +909,8 @@ func (rf *Raft) tryUpdateCommitIndex() {
 	}
 }
 
-func (rf *Raft) runLeader(term int, sendHBChan chan hbParams) {
-	start := time.Now()
-	to := LeaderIdlePeriod
-
+func (rf *Raft) runLeader(term int, start time.Time, to time.Duration, sendHBChan chan hbParams) {
+	updateTO(&to, start)
 	// send heartbeat
 	// go rf.sendHeartbeat(term)
 
