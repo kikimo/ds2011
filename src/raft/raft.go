@@ -746,6 +746,7 @@ WAIT:
 				rf.matchIndex[i] = 0
 			}
 
+			// TODO consider commit empty log if commitLogIndex lag behind lastLogIndex
 			// send empty heartbeat right away
 			rf.mu.Unlock()
 			sendHBChan := make(chan hbParams)
@@ -849,8 +850,11 @@ func (rf *Raft) sendHeartbeat(term int, sendHBChan chan hbParams, appendArgsList
 				// this is a stale result and we should ignore
 				if rf.nextIndex[server] == args.PrevLogIndex+1 {
 					rf.nextIndex[server] += len(args.Entries)
-					rf.matchIndex[server] = rf.nextIndex[server] - 1
-					rf.tryUpdateCommitIndex()
+					// should avoid calling tryUpdateCommitIndex() too often!
+					if rf.matchIndex[server] != rf.nextIndex[server]-1 {
+						rf.matchIndex[server] = rf.nextIndex[server] - 1
+						rf.tryUpdateCommitIndex()
+					}
 				}
 
 				rf.mu.Unlock()
