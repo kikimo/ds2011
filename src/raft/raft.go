@@ -311,20 +311,24 @@ func (rf *Raft) getHBEntries() []*AppendEntriesArgs {
 			continue
 		}
 
+		DPrintf("leader %d copying log for %d", rf.me, i)
 		offset := rf.log[0].Index
 		nextIndex := rf.nextIndex[i]
 		prevLogIndex := nextIndex - 1
 		prevLogTerm := rf.log[prevLogIndex-offset].Term
 		logSz := len(rf.log) - nextIndex + offset
 		// logSz := len(rf.log[nextIndex-offset:])
+		DPrintf("leader %d copying log for %d calling make() && copy()", rf.me, i)
 		log := make([]LogEntry, logSz)
 		copy(log, rf.log[nextIndex-offset:])
+		DPrintf("leader %d copying log for %d calling make() && copy() end", rf.me, i)
 		entries[i] = &AppendEntriesArgs{
 			PrevLogIndex: prevLogIndex,
 			PrevLogTerm:  prevLogTerm,
 			Entries:      log,
 			LeaderCommit: rf.commitIndex,
 		}
+		DPrintf("leader %d finish copying log for %d", rf.me, i)
 	}
 	DPrintf("leader %d finish preparing append entries at term %d", rf.me, rf.currentTerm)
 
@@ -888,7 +892,7 @@ func (rf *Raft) doUpdateCommitIndex(newCommitIndex int) {
 			rf.applyCh <- msg
 			rf.lastApplied++
 		}
-		DPrintf("server %d updating commit index from %d to %d at term %d, last applied: %d", rf.me, rf.commitIndex, newCommitIndex, rf.currentTerm, rf.lastApplied)
+		DPrintf("server %d update commit index to %d at term %d, last applied: %d", rf.me, newCommitIndex, rf.currentTerm, rf.lastApplied)
 	}
 }
 
@@ -911,6 +915,7 @@ func (rf *Raft) tryUpdateCommitIndex() {
 	if ent.Term == rf.currentTerm {
 		rf.doUpdateCommitIndex(newCommitIndex)
 	}
+	DPrintf("server %d finish updating commit index", rf.me)
 }
 
 func (rf *Raft) runLeader(term int, start time.Time, to time.Duration, sendHBChan chan hbParams) {
