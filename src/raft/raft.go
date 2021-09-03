@@ -409,7 +409,8 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		prevLogTerm := rf.log[prevLogIndex-offset].Term
 		if prevLogTerm == args.PrevLogTerm {
 			rf.appendLog(prevLogIndex, args.Entries)
-			DPrintf("follower %d append log from leader %d at term %d, prevLogIndex %d, entries: %+v, log after append: %+v", rf.me, args.LeaderID, rf.currentTerm, prevLogIndex, args.Entries, rf.log)
+			// DPrintf("follower %d append log from leader %d at term %d, prevLogIndex %d, entries: %+v, log after append: %+v", rf.me, args.LeaderID, rf.currentTerm, prevLogIndex, args.Entries, rf.log)
+			DPrintf("follower %d append log from leader %d at term %d, prevLogIndex %d", rf.me, args.LeaderID, rf.currentTerm, prevLogIndex)
 			if args.LeaderCommit > rf.commitIndex {
 				lastIndex := rf.log[0].Index + len(rf.log)
 				newCommitIndex := minInt(lastIndex, args.LeaderCommit)
