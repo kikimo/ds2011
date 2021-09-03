@@ -270,20 +270,16 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	}
 
 	rf.mu.Unlock()
-	defer func() {
-		params := rvParams{
-			requestVoteArgs:  *args,
-			requestVoteReply: *reply,
-		}
+	params := rvParams{
+		requestVoteArgs:  *args,
+		requestVoteReply: *reply,
+	}
 
-		go func() {
-			select {
-			case rf.rvChan <- params:
-			case <-time.After(MinElectionTimeout * time.Millisecond):
-				DPrintf("%s %d timeout sending request vote result at term %d", role, rf.me, term)
-			}
-		}()
-	}()
+	select {
+	case rf.rvChan <- params:
+	case <-time.After(MinElectionTimeout * time.Millisecond):
+		DPrintf("%s %d timeout sending request vote result at term %d", role, rf.me, term)
+	}
 }
 
 type AppendEntriesArgs struct {
@@ -433,20 +429,16 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	}
 
 	rf.mu.Unlock()
-	defer func() {
-		params := hbParams{
-			appendEntriesArgs:  *args,
-			appendEntriesReply: *reply,
-		}
+	params := hbParams{
+		appendEntriesArgs:  *args,
+		appendEntriesReply: *reply,
+	}
 
-		go func() {
-			select {
-			case rf.hbChan <- params:
-			case <-time.After(MinElectionTimeout * time.Millisecond):
-				DPrintf("%s %d timeout sending heartbeat result at term %d", role, rf.me, reply.Term)
-			}
-		}()
-	}()
+	select {
+	case rf.hbChan <- params:
+	case <-time.After(MinElectionTimeout * time.Millisecond):
+		DPrintf("%s %d timeout sending heartbeat result at term %d", role, rf.me, reply.Term)
+	}
 }
 
 //
