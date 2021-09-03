@@ -795,7 +795,8 @@ func (rf *Raft) sendHeartbeat(term int, sendHBChan chan hbParams, appendArgsList
 		reply := &AppendEntriesReply{}
 		// TODO extract and unit test me, important
 		go func(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) {
-			DPrintf("leader %d sending entries %+v to server %d at term %d, send empty: %t\n", rf.me, *args, server, term, sendEmptyHB)
+			// DPrintf("leader %d sending entries %+v to server %d at term %d, send empty: %t\n", rf.me, *args, server, term, sendEmptyHB)
+			DPrintf("leader %d sending entries %+v to server %d at term %d, send empty: %t\n", rf.me, nil, server, term, sendEmptyHB)
 			ok := rf.rpcManager.SendAppendEntries(server, args, reply)
 			if !ok {
 				return
