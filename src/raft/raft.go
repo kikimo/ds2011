@@ -255,14 +255,14 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		if rf.compareLog(args.LastLogTerm, args.LastLogIndex) {
 			rf.votedFor = args.CandiateID + 1
 			reply.VoteGranted = true
-			DPrintf("follower %d grant vote to %d at term %d", rf.me, args.CandiateID, rf.me)
+			DPrintf("follower %d grant vote to %d at term %d", rf.me, args.CandiateID, rf.currentTerm)
 		}
 	} else if rf.currentTerm == args.Term {
 		DPrintf("server %d comparing log %+v with lastLogTerm %d, lastLogIndex %d", rf.me, rf.log, args.LastLogTerm, args.LastLogIndex)
 		if rf.votedFor == 0 && rf.compareLog(args.LastLogTerm, args.LastLogIndex) {
 			reply.VoteGranted = true
 			rf.votedFor = args.CandiateID + 1
-			DPrintf("follower %d grant vote to %d at term %d", rf.me, args.CandiateID, rf.me)
+			DPrintf("follower %d grant vote to %d at term %d", rf.me, args.CandiateID, rf.currentTerm)
 		}
 	} else if rf.currentTerm > args.Term { // ignore stale vote request
 		rf.mu.Unlock()
