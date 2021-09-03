@@ -879,9 +879,10 @@ func (rf *Raft) doUpdateCommitIndex(newCommitIndex int) {
 			msg := ApplyMsg{
 				CommandValid: true,
 				CommandIndex: index,
-				Command:      rf.log[index-offset].Command,
+				// Command:      rf.log[index-offset].Command,
 			}
 			DPrintf("server %d applying msg %+v at term %d", rf.me, msg, rf.currentTerm)
+			msg.Command = rf.log[index-offset].Command
 			rf.applyCh <- msg
 			rf.lastApplied++
 		}
