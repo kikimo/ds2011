@@ -258,7 +258,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 			DPrintf("follower %d grant vote to %d at term %d", rf.me, args.CandiateID, rf.currentTerm)
 		}
 	} else if rf.currentTerm == args.Term {
-		DPrintf("server %d comparing log %+v with lastLogTerm %d, lastLogIndex %d", rf.me, rf.log, args.LastLogTerm, args.LastLogIndex)
+		DPrintf("server %d comparing log size %d with lastLogTerm %d, lastLogIndex %d", rf.me, len(rf.log)+rf.log[0].Index, args.LastLogTerm, args.LastLogIndex)
 		if rf.votedFor == 0 && rf.compareLog(args.LastLogTerm, args.LastLogIndex) {
 			reply.VoteGranted = true
 			rf.votedFor = args.CandiateID + 1
@@ -299,7 +299,7 @@ type AppendEntriesReply struct {
 // assume rf.mu lock hold
 // TODO test me, watch out for log index
 func (rf *Raft) getHBEntries() []*AppendEntriesArgs {
-	DPrintf("log of leader %d at term %d is: %+v, nextIndex: %+v, matchIndex: %+v", rf.me, rf.currentTerm, rf.log, rf.nextIndex, rf.matchIndex)
+	DPrintf("log size of leader %d at term %d is: %d, offset: %d nextIndex: %+v, matchIndex: %+v", rf.me, rf.currentTerm, len(rf.log), rf.log[0].Index, rf.nextIndex, rf.matchIndex)
 	sz := len(rf.peers)
 	entries := make([]*AppendEntriesArgs, sz)
 	for i := 0; i < sz; i++ {
@@ -422,7 +422,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 			reply.Success = true
 		} else {
-			DPrintf("follower %d failed appending log beacause log term mismatch, log size %+v, prevLogIndex %d", rf.me, rf.log, prevLogIndex)
+			DPrintf("follower %d failed appending log beacause log term mismatch, log size %d, prevLogIndex %d", rf.me, len(rf.log)+offset, prevLogIndex)
 		}
 	} else {
 		DPrintf("follower %d failed appending log beacause log index mismatch, log size %d, prevLogIndex %d", rf.me, len(rf.log)+offset, prevLogIndex)
