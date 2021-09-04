@@ -569,7 +569,7 @@ func (rf *Raft) ticker() {
 			lastLogTerm := lastLogEnt.Term
 			rf.mu.Unlock()
 			term++
-			voteChan := make(chan struct{})
+			voteChan := make(chan struct{}, 1)
 			go rf.startElection(term, voteChan, lastLogIndex, lastLogTerm)
 			rf.runCandidate(term, start, eto, voteChan)
 
@@ -578,7 +578,7 @@ func (rf *Raft) ticker() {
 			to := LeaderIdlePeriod
 			argsList := rf.getHBEntries()
 			rf.mu.Unlock()
-			sendHBChan := make(chan hbParams)
+			sendHBChan := make(chan hbParams, 1)
 			go rf.sendHeartbeat(term, sendHBChan, argsList, false)
 			rf.runLeader(term, start, to, sendHBChan)
 
@@ -609,6 +609,25 @@ WAIT:
 		// a follower will convert to candidate despite its term has been
 		// updated
 		rf.mu.Lock()
+		if term != rf.currentTerm {
+			// try get hb or rv msg if any
+			// TODO put me in a loop?
+			select {
+			case params := <-rf.hbChan:
+				// there are blocking hb msg
+				if params.appendEntriesArgs.Term > term {
+					return
+				}
+			case params := <-rf.rvChan:
+				// there are blocking rv msg
+				if params.requestVoteArgs.Term > term {
+					return
+				}
+			case <-time.After(4 * time.Millisecond):
+				DPrintf("follower %d term changed from %d to %d but recieve no hb or rv msg", rf.me, term, rf.currentTerm)
+			}
+		}
+
 		// we don't care about the term and role now
 		rf.role = RoleCandidate
 		rf.mu.Unlock()
@@ -746,7 +765,7 @@ WAIT:
 			// TODO consider commit empty log if commitLogIndex lag behind lastLogIndex
 			// send empty heartbeat right away
 			rf.mu.Unlock()
-			sendHBChan := make(chan hbParams)
+			sendHBChan := make(chan hbParams, 1)
 			rf.sendHeartbeat(term, sendHBChan, nil, true)
 		} else {
 			DPrintf("candidate %d not become leader at term %d(vote term %d)", rf.me, rf.currentTerm, term)
@@ -988,8 +1007,8 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	// start ticker goroutine to start elections
 	rf.role = RoleFollower
-	rf.hbChan = make(chan hbParams)
-	rf.rvChan = make(chan rvParams)
+	rf.hbChan = make(chan hbParams, 1)
+	rf.rvChan = make(chan rvParams, 1)
 	rf.applyCh = applyCh
 	rf.nextIndex = make([]int, len(rf.peers))
 	rf.matchIndex = make([]int, len(rf.peers))
