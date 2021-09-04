@@ -619,8 +619,8 @@ WAIT:
 					return
 				}
 			case params := <-rf.rvChan:
-				// there are blocking rv msg
-				if params.requestVoteArgs.Term > term {
+				// there are blocking rv msg, and we have grant vote to it
+				if params.requestVoteArgs.Term >= term && params.requestVoteReply.VoteGranted {
 					return
 				}
 			case <-time.After(4 * time.Millisecond):
