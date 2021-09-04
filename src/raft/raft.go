@@ -609,25 +609,24 @@ WAIT:
 		// a follower will convert to candidate despite its term has been
 		// updated
 		rf.mu.Lock()
-		if term != rf.currentTerm {
-			// try get hb or rv msg if any
-			// TODO put me in a loop?
-			select {
-			case params := <-rf.hbChan:
-				// there are blocking hb msg
-				if params.appendEntriesArgs.Term > term {
-					rf.mu.Unlock()
-					return
-				}
-			case params := <-rf.rvChan:
-				// there are blocking rv msg, and we have grant vote to it
-				if params.requestVoteArgs.Term >= term && params.requestVoteReply.VoteGranted {
-					rf.mu.Unlock()
-					return
-				}
-			case <-time.After(4 * time.Millisecond):
-				DPrintf("follower %d term changed from %d to %d but recieve no hb or rv msg", rf.me, term, rf.currentTerm)
+		// try get hb or rv msg if any
+		// TODO put me in a loop?
+		// TODO add unit test: timeout, but there are pending hv or rv msg, we should not convert to follower
+		select {
+		case params := <-rf.hbChan:
+			// there are blocking hb msg
+			if params.appendEntriesArgs.Term >= term {
+				rf.mu.Unlock()
+				return
 			}
+		case params := <-rf.rvChan:
+			// there are blocking rv msg, and we have grant vote to it
+			if params.requestVoteArgs.Term >= term && params.requestVoteReply.VoteGranted {
+				rf.mu.Unlock()
+				return
+			}
+		case <-time.After(4 * time.Millisecond): // TODO add constant
+			DPrintf("follower %d term changed from %d to %d but recieve no hb or rv msg", rf.me, term, rf.currentTerm)
 		}
 
 		// we don't care about the term and role now
