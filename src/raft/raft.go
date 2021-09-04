@@ -616,11 +616,13 @@ WAIT:
 			case params := <-rf.hbChan:
 				// there are blocking hb msg
 				if params.appendEntriesArgs.Term > term {
+					rf.mu.Unlock()
 					return
 				}
 			case params := <-rf.rvChan:
 				// there are blocking rv msg, and we have grant vote to it
 				if params.requestVoteArgs.Term >= term && params.requestVoteReply.VoteGranted {
+					rf.mu.Unlock()
 					return
 				}
 			case <-time.After(4 * time.Millisecond):
