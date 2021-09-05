@@ -790,7 +790,7 @@ func (rf *Raft) startElection(term int, voteResultChan chan struct{}, lastLogInd
 				rf.mu.Lock()
 				defer rf.mu.Unlock()
 
-				if reply.Term > term {
+				if reply.Term > term { // TODO do we need this?
 					// double check on currentTerm, beacause it might have been changed by other rpc
 					if reply.Term > rf.currentTerm {
 						DPrintf("candidate %d convert to follower and update term from %d to %d", rf.me, rf.currentTerm, reply.Term)
