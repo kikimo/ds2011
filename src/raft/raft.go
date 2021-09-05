@@ -314,16 +314,18 @@ func (rf *Raft) getHBEntries() []*AppendEntriesArgs {
 		prevLogTerm := rf.log[prevLogIndex-offset].Term
 		logSz := len(rf.log) - nextIndex + offset
 		// logSz := len(rf.log[nextIndex-offset:])
-		DPrintf("leader %d copying log for %d calling make() && copy()", rf.me, i)
-		log := make([]LogEntry, logSz)
-		copy(log, rf.log[nextIndex-offset:])
-		DPrintf("leader %d copying log for %d calling make() && copy() end", rf.me, i)
-		entries[i] = &AppendEntriesArgs{
+		ent := &AppendEntriesArgs{
 			PrevLogIndex: prevLogIndex,
 			PrevLogTerm:  prevLogTerm,
-			Entries:      log,
 			LeaderCommit: rf.commitIndex,
 		}
+
+		DPrintf("leader %d copying log for %d calling make() && copy()", rf.me, i)
+		if logSz > 0 {
+			ent.Entries = make([]LogEntry, logSz)
+			copy(ent.Entries, rf.log[nextIndex-offset:])
+		}
+		entries[i] = ent
 		DPrintf("leader %d finish copying log for %d", rf.me, i)
 	}
 	DPrintf("leader %d finish preparing append entries at term %d", rf.me, rf.currentTerm)
@@ -763,11 +765,12 @@ WAIT:
 				rf.matchIndex[i] = 0
 			}
 
+			argList := rf.getHBEntries()
 			// TODO consider commit empty log if commitLogIndex lag behind lastLogIndex
 			// send empty heartbeat right away
 			rf.mu.Unlock()
 			sendHBChan := make(chan hbParams, 1)
-			rf.sendHeartbeat(term, sendHBChan, nil, true)
+			rf.sendHeartbeat(term, sendHBChan, argList, false)
 		} else {
 			DPrintf("candidate %d not become leader at term %d(vote term %d)", rf.me, rf.currentTerm, term)
 			rf.mu.Unlock()
@@ -797,6 +800,7 @@ WAIT:
 	}
 }
 
+// TODO remove redundant sendEmptyHB parameter
 func (rf *Raft) sendHeartbeat(term int, sendHBChan chan hbParams, appendArgsList []*AppendEntriesArgs, sendEmptyHB bool) {
 	for i := range rf.peers {
 		if i == rf.me {
