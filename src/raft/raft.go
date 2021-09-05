@@ -292,8 +292,10 @@ type AppendEntriesArgs struct {
 }
 
 type AppendEntriesReply struct {
-	Success bool
-	Term    int
+	Success         bool
+	Term            int
+	NextTryLogIndex int
+	NextTryLogTerm  int
 }
 
 // assume rf.mu lock hold
@@ -372,6 +374,29 @@ func (rf *Raft) appendLog(prevLogIndex int, entries []LogEntry) bool {
 	return true
 }
 
+// TODO unit test me
+func (rf *Raft) findLogUpper(term int) *LogEntry {
+	s, e := 0, len(rf.log)
+
+	for s < e {
+		m := (s + e) / 2
+		if rf.log[m].Term > term {
+			e = m
+		} else { // rf.log[m] <= term
+			s = m + 1
+		}
+	}
+
+	if s == 0 {
+		DPrintf("incorrect upper of term %d, rf.log:", term)
+		for _, ent := range rf.log {
+			DPrintf("index: %d, term: %d\n", ent.Index, ent.Term)
+		}
+		panic("unreachable")
+	}
+	return &rf.log[s-1]
+}
+
 // rpc Implementation
 // TODO bisect optimization
 // TODO add case index mismatch, should reset election timer
@@ -407,7 +432,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	offset := rf.log[0].Index
 	prevLogIndex := args.PrevLogIndex
 	// make sure that prevLogIndex is in the range of rf.log
-	if prevLogIndex-offset < len(rf.log) {
+	if prevLogIndex >= offset && prevLogIndex < len(rf.log)+offset {
 		prevLogTerm := rf.log[prevLogIndex-offset].Term
 		if prevLogTerm == args.PrevLogTerm {
 			rf.appendLog(prevLogIndex, args.Entries)
@@ -426,9 +451,23 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			reply.Success = true
 		} else {
 			DPrintf("follower %d failed appending log beacause log term mismatch, log size %d, prevLogIndex %d", rf.me, len(rf.log)+offset, prevLogIndex)
+			if prevLogTerm < args.PrevLogTerm {
+				reply.NextTryLogIndex = prevLogIndex
+				reply.NextTryLogTerm = prevLogTerm
+			} else { // prevLogTerm > args.PrevLogTerm
+				ent := rf.findLogUpper(args.PrevLogTerm)
+				reply.NextTryLogIndex = ent.Index
+				reply.NextTryLogTerm = ent.Term
+			}
 		}
-	} else {
+	} else if prevLogIndex >= offset+len(rf.log) { // out of range
+		// fmt.Printf("server %d, testing leader prevLogIndex %d, prevLogTerm %d\n", rf.me, args.PrevLogIndex, args.PrevLogTerm)
+		// fmt.Printf("server %d log: %+v\n", rf.me, rf.log)
+		reply.NextTryLogIndex = len(rf.log) + rf.log[0].Index - 1
+		reply.NextTryLogTerm = rf.log[len(rf.log)-1].Term
 		DPrintf("follower %d failed appending log beacause log index mismatch, log size %d, prevLogIndex %d", rf.me, len(rf.log)+offset, prevLogIndex)
+	} else { // prevLogIndex < offset
+		panic("no implemented")
 	}
 
 	rf.mu.Unlock()
@@ -884,7 +923,30 @@ func (rf *Raft) sendHeartbeat(term int, sendHBChan chan hbParams, appendArgsList
 				// log unmatch, decrease by one
 				// TODO optimize index matching algorithm
 				if rf.nextIndex[server] == args.PrevLogIndex+1 {
-					rf.nextIndex[server]--
+					// are we within legal range
+					offset := rf.log[0].Index
+					if reply.NextTryLogIndex >= offset && reply.NextTryLogIndex < offset+len(rf.log) {
+						nextTryLogTerm := rf.log[reply.NextTryLogIndex-offset].Term
+						if reply.NextTryLogTerm == nextTryLogTerm {
+							rf.nextIndex[server] = reply.NextTryLogIndex + 1
+							// fmt.Printf("leader log: %+v\n", rf.log)
+						} else if reply.NextTryLogTerm > nextTryLogTerm {
+							rf.nextIndex[server] = reply.NextTryLogIndex
+							// fmt.Printf("server %d next index of term %d is %d\n", server, reply.NextTryLogTerm, rf.nextIndex[server])
+						} else { // reply.NextTryLogIndex < nextTryLogTerm
+							ent := rf.findLogUpper(reply.NextTryLogTerm)
+							rf.nextIndex[server] = ent.Index + 1
+							// fmt.Printf("server %d find upper of %d: %+v\n", server, reply.NextTryLogTerm, ent)
+						}
+						// fmt.Printf("server %d nextIndex %d\n", server, rf.nextIndex[server])
+					} else if reply.NextTryLogIndex < offset {
+						// under flow
+						panic("no implemented")
+					} else { // reply.NextTryLogIndex >= offset + len(rf.log)
+						panic("unreachable")
+					}
+
+					// rf.nextIndex[server]--
 				} else {
 					DPrintf("leader %d failed to update nextIndex of %d beacause of mismatch, rf.nextIndex[server] %d, prevLogIndex %d", rf.me, server, rf.nextIndex[server], args.PrevLogIndex)
 				}
