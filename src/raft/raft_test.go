@@ -14,6 +14,7 @@ type raftStatus struct {
 	numPeers int
 	term     int
 	votedFor int
+	log      []LogEntry
 	role     RaftRole
 }
 
@@ -79,36 +80,32 @@ func newFakeRaftRPCManager(appendReplies []*testAppendEntriesReply, voteReplies 
 	}
 }
 
-func _newTestRaft(status *raftStatus) *Raft {
+func newTestRaft(status *raftStatus) *Raft {
 	rf := &Raft{}
+	rf.log = status.log
+	if len(rf.log) == 0 {
+		nullEnt := LogEntry{
+			Index: 0,
+			Term:  0,
+		}
+		rf.log = append(rf.log, nullEnt)
+	}
+
 	rf.peers = make([]*labrpc.ClientEnd, status.numPeers)
 	rf.me = 0
 	rf.role = status.role
 	rf.currentTerm = status.term
 	rf.votedFor = status.votedFor
+	rf.nextIndex = make([]int, len(rf.peers))
+	rf.matchIndex = make([]int, len(rf.peers))
 
 	// start ticker goroutine to start elections
 	rf.hbChan = make(chan hbParams)
 	rf.rvChan = make(chan rvParams)
-	// rf.raftRPCManager = &fakeRaftRPCManager{rf: rf}
+	// rf.applyCh = nil
 
 	return rf
 
-}
-
-func newTestRaft(numPeers int, term int, role RaftRole) *Raft {
-	rf := &Raft{}
-	rf.peers = make([]*labrpc.ClientEnd, numPeers)
-	rf.me = 0
-	rf.role = role
-	rf.currentTerm = term
-
-	// start ticker goroutine to start elections
-	rf.hbChan = make(chan hbParams)
-	rf.rvChan = make(chan rvParams)
-	// rf.raftRPCManager = &fakeRaftRPCManager{rf: rf}
-
-	return rf
 }
 
 func TestRunFollowerUT(t *testing.T) {
@@ -252,7 +249,7 @@ func TestRunFollowerUT(t *testing.T) {
 	}
 
 	for _, c := range cases {
-		rf := _newTestRaft(c.testRaftStatus)
+		rf := newTestRaft(c.testRaftStatus)
 		if c.testHBParams != nil {
 			go func() {
 				select {
@@ -319,32 +316,40 @@ func TestRunLeaderUT(t *testing.T) {
 }
 
 func TestAppendEntriesUT(t *testing.T) {
-	// cases:
-	//  1. ~~ignore stale request~~
-	//  2. ~~follower handle normal request(should resset election timer)~~
-	//  3. ~~candidate handle normal request, update term and convert to follower~~
+	// TODO cases:
+	//  1. ignore stale request and should remain wait
+	//  2. follower handle normal request(should resset election timer)
+	//  3. candidate handle normal request, update term and convert to follower
+	// 	4. follower handle normal request and append log
+	// 	5. follower handle normal request but failed to append log beacause of log mismatch
+	// what to check:
+	// 	1. election timer
+	// 	2. raft role
+	// 	3. raft log
+	// 	4. reply term
+	//	5. reply success
 	cases := []struct {
 		name              string
-		numPeers          int
-		currentTerm       int
 		expectedRaftTerm  int
 		expectedReplyTerm int
 		expectedSuccess   bool
 		expectedRaftRole  RaftRole
-		role              RaftRole
+		rfStatus          *raftStatus
 		args              *AppendEntriesArgs
 		reply             *AppendEntriesReply
 		bolck             bool
 	}{
 		{
 			name:              "Ignore stale append entries",
-			numPeers:          3,
-			currentTerm:       1,
 			expectedRaftTerm:  1,
 			expectedReplyTerm: 1,
 			expectedRaftRole:  RoleFollower,
-			role:              RoleFollower,
-			expectedSuccess:   false,
+			rfStatus: &raftStatus{
+				numPeers: 3,
+				term:     1,
+				role:     RoleFollower,
+			},
+			expectedSuccess: false,
 			args: &AppendEntriesArgs{
 				Term:     0,
 				LeaderID: 1,
@@ -353,10 +358,12 @@ func TestAppendEntriesUT(t *testing.T) {
 			bolck: true,
 		},
 		{
-			name:              "Normal hb request",
-			numPeers:          3,
-			currentTerm:       1,
-			role:              RoleFollower,
+			name: "Normal hb request",
+			rfStatus: &raftStatus{
+				numPeers: 3,
+				term:     1,
+				role:     RoleFollower,
+			},
 			expectedReplyTerm: 1,
 			expectedRaftTerm:  1,
 			expectedRaftRole:  RoleFollower,
@@ -369,10 +376,12 @@ func TestAppendEntriesUT(t *testing.T) {
 			bolck:           false,
 		},
 		{
-			name:              "Candidate handle normal request, update term and convert to follower",
-			numPeers:          3,
-			currentTerm:       0,
-			role:              RoleCandidate,
+			name: "Candidate handle normal request, update term and convert to follower",
+			rfStatus: &raftStatus{
+				numPeers: 3,
+				term:     0,
+				role:     RoleCandidate,
+			},
 			expectedReplyTerm: 0,
 			expectedRaftTerm:  1,
 			expectedRaftRole:  RoleFollower,
@@ -386,7 +395,7 @@ func TestAppendEntriesUT(t *testing.T) {
 	}
 
 	for _, c := range cases {
-		rf := newTestRaft(c.numPeers, c.currentTerm, c.role)
+		rf := newTestRaft(c.rfStatus)
 		rf.AppendEntries(c.args, c.reply)
 
 		if c.reply.Success != c.expectedSuccess {
@@ -411,22 +420,20 @@ func TestAppendEntriesUT(t *testing.T) {
 }
 
 func TestRequestVoteUT(t *testing.T) {
-	// cases:
-	// 1. vote no granted
-	// 	1.1 stale term
-	// 	1.2 vote granted to other candidate
-	// 1. vote granted
+	// TODO cases:
+	// 1. stale term vote no granted
+	// 2. vote granted to other candidate
+	// 3. vote no granted beacause log fall behind
+	// 4. vote granted beacause of higher term
+	// 5. vote granted at the same term
 	// what to check
 	//  1. reply term
-	//  2. reply success status
-	//  3. raft term
+	//  2. reply voteGranted
+	//  3. raft currentTerm
 	//  4. raft role
 	cases := []struct {
 		name                     string
 		rfStatus                 *raftStatus
-		numPeers                 int
-		term                     int
-		role                     RaftRole
 		args                     *RequestVoteArgs
 		reply                    *RequestVoteReply
 		expectedReplyTerm        int
@@ -497,7 +504,7 @@ func TestRequestVoteUT(t *testing.T) {
 	}
 
 	for _, c := range cases {
-		rf := _newTestRaft(c.rfStatus)
+		rf := newTestRaft(c.rfStatus)
 		rf.RequestVote(c.args, c.reply)
 
 		if c.reply.Term != c.expectedReplyTerm {
@@ -519,23 +526,25 @@ func TestRequestVoteUT(t *testing.T) {
 }
 
 func TestStartElectionUT(t *testing.T) {
-	// cases:
+	// TODO cases:
 	//  1. win an election
 	//  2. election tie
 	//  3. lost an election(recieve higher term and convert to follower)
+	// 	4. TODO loss an election beacause of log behind
 	cases := []struct {
 		name        string
-		peerCount   int
-		currentTerm int
+		rfStatus    *raftStatus
 		voteReplies []*testRequestVoteReply
 		// expectedRole RaftRole
 		// expectedTerm int
 		win bool
 	}{
 		{
-			name:        "win election",
-			peerCount:   3,
-			currentTerm: 0,
+			name: "win election",
+			rfStatus: &raftStatus{
+				numPeers: 3,
+				term:     0,
+			},
 			voteReplies: []*testRequestVoteReply{
 				{
 					ok: true,
@@ -557,9 +566,11 @@ func TestStartElectionUT(t *testing.T) {
 			win: true,
 		},
 		{
-			name:        "election tie",
-			peerCount:   3,
-			currentTerm: 0,
+			name: "election tie",
+			rfStatus: &raftStatus{
+				numPeers: 3,
+				term:     0,
+			},
 			voteReplies: []*testRequestVoteReply{
 				{
 					ok: true,
@@ -572,9 +583,11 @@ func TestStartElectionUT(t *testing.T) {
 			win: false,
 		},
 		{
-			name:        "lose an election",
-			peerCount:   3,
-			currentTerm: 0,
+			name: "lose an election",
+			rfStatus: &raftStatus{
+				numPeers: 3,
+				term:     0,
+			},
 			voteReplies: []*testRequestVoteReply{
 				{
 					ok: true,
@@ -589,12 +602,15 @@ func TestStartElectionUT(t *testing.T) {
 	}
 
 	for _, c := range cases {
-		rf := newTestRaft(c.peerCount, c.currentTerm, RoleCandidate)
+		rf := newTestRaft(c.rfStatus)
 		rpcManager := newFakeRaftRPCManager(nil, c.voteReplies)
 		rf.rpcManager = rpcManager
 
 		resultChan := make(chan struct{})
-		rf.startElection(rf.currentTerm, resultChan)
+		lastLogEnt := rf.log[len(rf.log)-1]
+		lastLogIndex := lastLogEnt.Index
+		lastLogTerm := lastLogEnt.Term
+		rf.startElection(rf.currentTerm, resultChan, lastLogIndex, lastLogTerm)
 		// time.Sleep(10 * MaxElectionTimeout * time.Millisecond)
 
 		select {
@@ -620,23 +636,25 @@ func TestStartElectionUT(t *testing.T) {
 
 func TestSendHeartbeatUT(t *testing.T) {
 	// cases:
-	//  1. recieve same term and remain leader
+	//  1. recieve same term and remain leader(success)
 	//  2. recieve higher term and convert to follower
+	//  3. TODO sendHeartBeat failed beacause of log mismatch
 	cases := []struct {
 		name          string
-		peerCount     int
+		rfStatus      *raftStatus
 		isLeader      bool
-		currentTerm   int
 		expectedTerm  int
 		appendReplies []*testAppendEntriesReply
 	}{
 		{
-			name:         "'remain leader'",
-			peerCount:    3,
+			name: "'remain leader'",
+			rfStatus: &raftStatus{
+				role:     RoleLeader,
+				numPeers: 3,
+				term:     0,
+			},
 			isLeader:     true,
-			currentTerm:  0,
 			expectedTerm: 0,
-
 			appendReplies: []*testAppendEntriesReply{
 				{
 					ok: true,
@@ -648,10 +666,13 @@ func TestSendHeartbeatUT(t *testing.T) {
 			},
 		},
 		{
-			name:         "'converted to follower'",
-			peerCount:    3,
+			name: "'converted to follower'",
+			rfStatus: &raftStatus{
+				role:     RoleLeader,
+				numPeers: 3,
+				term:     0,
+			},
 			isLeader:     false,
-			currentTerm:  0,
 			expectedTerm: 1,
 			appendReplies: []*testAppendEntriesReply{
 				{
@@ -666,17 +687,18 @@ func TestSendHeartbeatUT(t *testing.T) {
 	}
 
 	for _, c := range cases {
-		rf := newTestRaft(c.peerCount, c.currentTerm, RoleLeader)
+		rf := newTestRaft(c.rfStatus)
 		rpcManager := newFakeRaftRPCManager(c.appendReplies, nil)
 		rf.rpcManager = rpcManager
 
-		sendHBChan := make(chan hbParams, 0)
-		rf.sendHeartbeat(rf.currentTerm, sendHBChan, false)
+		sendHBChan := make(chan hbParams)
+		// TODO test append entries
+		rf.sendHeartbeat(rf.currentTerm, sendHBChan, nil, true)
 		// wait for rpc being called
 		time.Sleep(MaxElectionTimeout * time.Millisecond)
 		rpcCount := int(atomic.LoadInt32(&(rpcManager.appendEntriesRPCCount)))
-		if rpcCount != c.peerCount-1 {
-			t.Errorf("case %s expect %d append entries rpc but got %d\n", c.name, c.peerCount-1, rpcCount)
+		if rpcCount != c.rfStatus.numPeers-1 {
+			t.Errorf("case %s expect %d append entries rpc but got %d\n", c.name, c.rfStatus.numPeers-1, rpcCount)
 		}
 
 		term, isLeader := rf.GetState()
@@ -686,6 +708,237 @@ func TestSendHeartbeatUT(t *testing.T) {
 
 		if isLeader != c.isLeader {
 			t.Errorf("case %s expect raft to be leader %t, but got %t", c.name, c.isLeader, isLeader)
+		}
+	}
+}
+
+func TestCompareLogUT(t *testing.T) {
+	// cases:
+	// 	1. same term, same index
+	//  2. higher term, lower index
+	//  3. lower term, higher index
+	cases := []struct {
+		name         string
+		lastLogIndex int
+		lastLogTerm  int
+		rfStatus     *raftStatus
+		success      bool
+	}{
+		{
+			name:         "same term same index",
+			lastLogTerm:  3,
+			lastLogIndex: 4,
+			rfStatus: &raftStatus{
+				log: []LogEntry{
+					{
+						Term:  3,
+						Index: 4,
+					},
+				},
+			},
+			success: true,
+		},
+		{
+			name:         "higher term lower index",
+			lastLogTerm:  4,
+			lastLogIndex: 3,
+			rfStatus: &raftStatus{
+				log: []LogEntry{
+					{
+						Term:  3,
+						Index: 4,
+					},
+				},
+			},
+			success: true,
+		},
+		{
+			name:         "lower term higher index",
+			lastLogTerm:  2,
+			lastLogIndex: 5,
+			rfStatus: &raftStatus{
+				log: []LogEntry{
+					{
+						Term:  3,
+						Index: 4,
+					},
+				},
+			},
+			success: false,
+		},
+	}
+
+	for _, c := range cases {
+		rf := newTestRaft(c.rfStatus)
+		success := rf.compareLog(c.lastLogTerm, c.lastLogIndex)
+		if success != c.success {
+			t.Errorf("Error testing %s, expect result %t but got %t", c.name, c.success, success)
+		}
+	}
+}
+
+func TestAppendLogUT(t *testing.T) {
+	// cases:
+	// 	1. all match and longer
+	// 	2. all match and shorter
+	//  3. mismatch and longer
+	//  4. mismatch and shorter
+	cases := []struct {
+		name         string
+		prevLogIndex int
+		entries      []LogEntry
+		match        bool
+		size         int
+		rfStatus     *raftStatus
+	}{
+		{
+			name:         "all match and longer",
+			prevLogIndex: 2,
+			entries: []LogEntry{
+				{
+					Index: 3,
+					Term:  4,
+				},
+				{
+					Index: 4,
+					Term:  4,
+				},
+			},
+			match: true,
+			size:  4,
+			rfStatus: &raftStatus{
+				log: []LogEntry{
+					{
+						Index: 1,
+						Term:  2,
+					},
+					{
+						Index: 2,
+						Term:  2,
+					},
+					{
+						Index: 3,
+						Term:  4,
+					},
+				},
+			},
+		},
+		{
+			name:         "all match and shorter",
+			prevLogIndex: 2,
+			entries: []LogEntry{
+				{
+					Index: 3,
+					Term:  4,
+				},
+			},
+			match: true,
+			rfStatus: &raftStatus{
+				log: []LogEntry{
+					{
+						Index: 1,
+						Term:  2,
+					},
+					{
+						Index: 2,
+						Term:  2,
+					},
+					{
+						Index: 3,
+						Term:  4,
+					},
+					{
+						Index: 4,
+						Term:  5,
+					},
+				},
+			},
+			size: 4,
+		},
+		{
+			name:         "mismatch and longer",
+			size:         4,
+			prevLogIndex: 1,
+			entries: []LogEntry{
+				{
+					Index: 2,
+					Term:  3,
+				},
+				{
+					Index: 3,
+					Term:  4,
+				},
+				{
+					Index: 4,
+					Term:  4,
+				},
+			},
+			match: false,
+			rfStatus: &raftStatus{
+				log: []LogEntry{
+					{
+						Index: 1,
+						Term:  2,
+					},
+					{
+						Index: 2,
+						Term:  2,
+					},
+					{
+						Index: 3,
+						Term:  4,
+					},
+				},
+			},
+		},
+		{
+			name:         "mismatch and shorter",
+			size:         3,
+			prevLogIndex: 1,
+			entries: []LogEntry{
+				{
+					Index: 2,
+					Term:  3,
+				},
+				{
+					Index: 3,
+					Term:  4,
+				},
+			},
+			match: false,
+			rfStatus: &raftStatus{
+				log: []LogEntry{
+					{
+						Index: 1,
+						Term:  2,
+					},
+					{
+						Index: 2,
+						Term:  2,
+					},
+					{
+						Index: 3,
+						Term:  4,
+					},
+					{
+						Index: 4,
+						Term:  5,
+					},
+				},
+			},
+		},
+	}
+
+	for _, c := range cases {
+		rf := newTestRaft(c.rfStatus)
+		match := rf.appendLog(c.prevLogIndex, c.entries)
+		if match != c.match {
+			t.Errorf("Error testing %s, expect log match to be %t but got %t", c.name, c.match, match)
+		}
+
+		sz := len(rf.log)
+		if sz != c.size {
+			t.Errorf("Error testing %s, expect log growth to be of size %d but got %d", c.name, c.size, sz)
 		}
 	}
 }
