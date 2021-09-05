@@ -19,6 +19,7 @@ package raft
 
 import (
 	//	"bytes"
+	"bytes"
 	"fmt"
 	"math/rand"
 	"sort"
@@ -27,6 +28,7 @@ import (
 	"time"
 
 	//	"6.824/labgob"
+	"6.824/labgob"
 	"6.824/labrpc"
 )
 
@@ -142,6 +144,13 @@ func (rf *Raft) persist() {
 	// e.Encode(rf.yyy)
 	// data := w.Bytes()
 	// rf.persister.SaveRaftState(data)
+	w := new(bytes.Buffer)
+	e := labgob.NewEncoder(w)
+	e.Encode(rf.currentTerm)
+	e.Encode(rf.votedFor)
+	e.Encode(rf.log)
+	data := w.Bytes()
+	rf.persister.SaveRaftState(data)
 }
 
 //
@@ -164,6 +173,19 @@ func (rf *Raft) readPersist(data []byte) {
 	//   rf.xxx = xxx
 	//   rf.yyy = yyy
 	// }
+	r := bytes.NewBuffer(data)
+	d := labgob.NewDecoder(r)
+	if err := d.Decode(&rf.currentTerm); err != nil {
+		panic(fmt.Sprintf("failed decoding currentTerm: %+v", err))
+	}
+
+	if err := d.Decode(&rf.votedFor); err != nil {
+		panic(fmt.Sprintf("failed decoding votedFor: %+v", err))
+	}
+
+	if err := d.Decode(&rf.log); err != nil {
+		panic(fmt.Sprintf("failed decoding log: %+v", err))
+	}
 }
 
 //
@@ -257,11 +279,13 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 			reply.VoteGranted = true
 			DPrintf("follower %d grant vote to %d at term %d", rf.me, args.CandiateID, rf.currentTerm)
 		}
+		rf.persist()
 	} else if rf.currentTerm == args.Term {
 		DPrintf("server %d comparing log size %d with lastLogTerm %d, lastLogIndex %d", rf.me, len(rf.log)+rf.log[0].Index, args.LastLogTerm, args.LastLogIndex)
 		if rf.votedFor == 0 && rf.compareLog(args.LastLogTerm, args.LastLogIndex) {
 			reply.VoteGranted = true
 			rf.votedFor = args.CandiateID + 1
+			rf.persist()
 			DPrintf("follower %d grant vote to %d at term %d", rf.me, args.CandiateID, rf.currentTerm)
 		}
 	} else if rf.currentTerm > args.Term { // ignore stale vote request
@@ -413,12 +437,15 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		return
 	}
 
+	needPersist := false
+
 	// update currentTerm and convert to follower
 	// TODO if currentTerm == args.Term and role is candidate
 	// we should convert it to follower
 	// TODO add unit test to cover this situation
 	if rf.currentTerm < args.Term {
 		rf.currentTerm = args.Term
+		needPersist = true
 	}
 
 	if rf.role != RoleFollower {
@@ -436,6 +463,10 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		prevLogTerm := rf.log[prevLogIndex-offset].Term
 		if prevLogTerm == args.PrevLogTerm {
 			rf.appendLog(prevLogIndex, args.Entries)
+			if len(args.Entries) > 0 {
+				// TODO can be further optimized because appending log doesn't necessary change rf.log
+				needPersist = true
+			}
 			// DPrintf("follower %d append log from leader %d at term %d, prevLogIndex %d, entries: %+v, log after append: %+v", rf.me, args.LeaderID, rf.currentTerm, prevLogIndex, args.Entries, rf.log)
 			DPrintf("follower %d append log from leader %d at term %d, prevLogIndex %d", rf.me, args.LeaderID, rf.currentTerm, prevLogIndex)
 			if args.LeaderCommit > rf.commitIndex {
@@ -468,6 +499,10 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		DPrintf("follower %d failed appending log beacause log index mismatch, log size %d, prevLogIndex %d", rf.me, len(rf.log)+offset, prevLogIndex)
 	} else { // prevLogIndex < offset
 		panic("no implemented")
+	}
+
+	if needPersist {
+		rf.persist()
 	}
 
 	rf.mu.Unlock()
@@ -553,6 +588,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		Command: command,
 	}
 	rf.log = append(rf.log, ent)
+	rf.persist()
 	rf.nextIndex[rf.me] = index + 1
 	rf.matchIndex[rf.me] = index
 
@@ -573,6 +609,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 func (rf *Raft) Kill() {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
+	// TODO move me to the poing before acquiring rf.mu lock?
 	atomic.StoreInt32(&rf.dead, 1)
 	// Your code here, if desired.
 	close(rf.applyCh)
@@ -605,6 +642,7 @@ func (rf *Raft) ticker() {
 			eto := getElectionTimeout()
 			rf.votedFor = rf.me + 1
 			rf.currentTerm++
+			rf.persist()
 			lastLogEnt := rf.log[len(rf.log)-1]
 			lastLogIndex := lastLogEnt.Index
 			lastLogTerm := lastLogEnt.Term
@@ -760,6 +798,7 @@ func (rf *Raft) startElection(term int, voteResultChan chan struct{}, lastLogInd
 						rf.currentTerm = reply.Term
 						rf.role = RoleFollower
 						rf.votedFor = 0
+						rf.persist()
 					}
 				}
 
@@ -866,26 +905,36 @@ func (rf *Raft) sendHeartbeat(term int, sendHBChan chan hbParams, appendArgsList
 			}
 
 			rf.mu.Lock()
-			if rf.currentTerm != term { // rf.currentTerm should have been updated
-				rf.mu.Unlock()
-				params := hbParams{
-					appendEntriesReply: *reply,
-				}
+			// if rf.currentTerm != term { // rf.currentTerm should have been updated
+			// 	rf.mu.Unlock()
+			// 	params := hbParams{
+			// 		appendEntriesReply: *reply,
+			// 	}
 
-				select {
-				case sendHBChan <- params:
-				case <-time.After(MinElectionTimeout * time.Millisecond):
-					DPrintf("leader %d timeout sending role update msg from %d at term %d, new term is %d", rf.me, server, term, reply.Term)
-				}
+			// 	select {
+			// 	case sendHBChan <- params:
+			// 	case <-time.After(MinElectionTimeout * time.Millisecond):
+			// 		DPrintf("leader %d timeout sending role update msg from %d at term %d, new term is %d", rf.me, server, term, reply.Term)
+			// 	}
 
-				return
-			}
+			// 	return
+			// }
 
 			// rf.currentTerm == term
-			if term < reply.Term {
-				rf.currentTerm = reply.Term
-				rf.role = RoleFollower
-				rf.votedFor = 0
+			if term < reply.Term { // TODO do we really need this?
+				// TODO unit test me
+				// rf.currentTerm might have been updated if we set rf.voteFor = 0
+				// or rf.currentTerm = reply.Term directly we might override exiting value
+				if rf.currentTerm < reply.Term {
+					rf.currentTerm = reply.Term
+					rf.role = RoleFollower
+					if rf.votedFor == rf.me+1 {
+						rf.votedFor = 0
+					}
+
+					rf.persist()
+				}
+
 				rf.mu.Unlock()
 				params := hbParams{
 					appendEntriesReply: *reply,

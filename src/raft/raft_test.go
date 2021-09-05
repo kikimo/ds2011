@@ -95,6 +95,7 @@ func newTestRaft(status *raftStatus) *Raft {
 	rf.me = 0
 	rf.role = status.role
 	rf.currentTerm = status.term
+	rf.persister = MakePersister()
 	rf.votedFor = status.votedFor
 	rf.nextIndex = make([]int, len(rf.peers))
 	rf.matchIndex = make([]int, len(rf.peers))
