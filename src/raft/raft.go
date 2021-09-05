@@ -609,7 +609,6 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 func (rf *Raft) Kill() {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	// TODO move me to the poing before acquiring rf.mu lock?
 	atomic.StoreInt32(&rf.dead, 1)
 	// Your code here, if desired.
 	close(rf.applyCh)
@@ -1007,7 +1006,7 @@ func (rf *Raft) sendHeartbeat(term int, sendHBChan chan hbParams, appendArgsList
 
 // assume rf.mu lock hold
 func (rf *Raft) doUpdateCommitIndex(newCommitIndex int) {
-	if newCommitIndex > rf.commitIndex {
+	if newCommitIndex > rf.commitIndex && !rf.killed() {
 		offset := rf.log[0].Index
 		rf.commitIndex = newCommitIndex
 		for rf.lastApplied < rf.commitIndex {
@@ -1019,8 +1018,14 @@ func (rf *Raft) doUpdateCommitIndex(newCommitIndex int) {
 			}
 			DPrintf("server %d applying msg %+v at term %d", rf.me, msg, rf.currentTerm)
 			msg.Command = rf.log[index-offset].Command
-			rf.applyCh <- msg
-			rf.lastApplied++
+			select {
+			case rf.applyCh <- msg:
+				rf.lastApplied++
+			case <-time.After(4 * time.Millisecond):
+				// TODO commit msg if lastApplied < rf.commitIndex
+				DPrintf("leader %d timeout commiting msg %d at term %d", rf.me, rf.lastApplied, rf.currentTerm)
+				return
+			}
 		}
 		DPrintf("server %d update commit index to %d at term %d, last applied: %d", rf.me, newCommitIndex, rf.currentTerm, rf.lastApplied)
 	}
