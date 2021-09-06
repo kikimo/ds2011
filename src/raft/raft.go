@@ -918,7 +918,6 @@ func (rf *Raft) sendHeartbeat(term int, sendHBChan chan hbParams, appendArgsList
 
 			// 	return
 			// }
-
 			// rf.currentTerm == term
 			if term < reply.Term { // TODO do we really need this?
 				// TODO unit test me
@@ -948,10 +947,18 @@ func (rf *Raft) sendHeartbeat(term int, sendHBChan chan hbParams, appendArgsList
 				return
 			}
 
-			if sendEmptyHB {
+			// role changed return directly
+			// TODO add unit test: role changed, and leader's log might got truncated
+			// if we proceed to append log, reply.NextTryLogIndex might exceed rf.log
+			if rf.currentTerm != term || rf.role != RoleLeader {
 				rf.mu.Unlock()
 				return
 			}
+
+			// if sendEmptyHB {
+			// 	rf.mu.Unlock()
+			// 	return
+			// }
 
 			// term >= reply.Term
 			if reply.Success {
