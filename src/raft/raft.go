@@ -1012,6 +1012,7 @@ func (rf *Raft) sendHeartbeat(term int, sendHBChan chan hbParams, appendArgsList
 }
 
 // assume rf.mu lock hold
+// TODO add ut: raft should gurrantee that commited entries are applied asap
 func (rf *Raft) doUpdateCommitIndex(newCommitIndex int) {
 	if newCommitIndex > rf.commitIndex && !rf.killed() {
 		offset := rf.log[0].Index
