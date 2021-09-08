@@ -480,11 +480,13 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 					panic(fmt.Sprintf("%s %d commited entries trunked from %d to %d", rf.role, rf.me, rf.commitIndex, newCommitIndex))
 				}
 				// rf.doUpdateCommitIndex(newCommitIndex)
-				rf.commitIndex = newCommitIndex
-				select {
-				case rf.commitCh <- newCommitIndex:
-				case <-time.After(32 * time.Millisecond):
-					DPrintf("follower %d timeout notifying new commit index %d at term %d", rf.me, newCommitIndex, rf.currentTerm)
+				if rf.commitIndex < newCommitIndex {
+					rf.commitIndex = newCommitIndex
+					select {
+					case rf.commitCh <- newCommitIndex:
+					case <-time.After(32 * time.Millisecond):
+						DPrintf("follower %d timeout notifying new commit index %d at term %d", rf.me, newCommitIndex, rf.currentTerm)
+					}
 				}
 			}
 
@@ -1150,13 +1152,14 @@ func (rf *Raft) tryUpdateCommitIndex() {
 	// leader only commit log from current term
 	if ent.Term == rf.currentTerm {
 		// rf.doUpdateCommitIndex(newCommitIndex)
-		rf.commitIndex = newCommitIndex
-		select {
-		case rf.commitCh <- newCommitIndex:
-		case <-time.After(32 * time.Millisecond):
-			DPrintf("follower %d timeout notifying new commit index %d at term %d", rf.me, newCommitIndex, rf.currentTerm)
+		if rf.commitIndex < newCommitIndex {
+			rf.commitIndex = newCommitIndex
+			select {
+			case rf.commitCh <- newCommitIndex:
+			case <-time.After(32 * time.Millisecond):
+				DPrintf("follower %d timeout notifying new commit index %d at term %d", rf.me, newCommitIndex, rf.currentTerm)
+			}
 		}
-
 	}
 	DPrintf("server %d finish updating commit index", rf.me)
 }
