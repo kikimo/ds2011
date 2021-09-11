@@ -19,6 +19,7 @@ package raft
 
 import (
 	//	"bytes"
+	"bytes"
 	"fmt"
 	"math/rand"
 	"sort"
@@ -27,6 +28,7 @@ import (
 	"time"
 
 	//	"6.824/labgob"
+	"6.824/labgob"
 	"6.824/labrpc"
 )
 
@@ -142,6 +144,13 @@ func (rf *Raft) persist() {
 	// e.Encode(rf.yyy)
 	// data := w.Bytes()
 	// rf.persister.SaveRaftState(data)
+	w := new(bytes.Buffer)
+	e := labgob.NewEncoder(w)
+	e.Encode(rf.currentTerm)
+	e.Encode(rf.votedFor)
+	e.Encode(rf.log)
+	data := w.Bytes()
+	rf.persister.SaveRaftState(data)
 }
 
 //
@@ -164,6 +173,19 @@ func (rf *Raft) readPersist(data []byte) {
 	//   rf.xxx = xxx
 	//   rf.yyy = yyy
 	// }
+	r := bytes.NewBuffer(data)
+	d := labgob.NewDecoder(r)
+	if err := d.Decode(&rf.currentTerm); err != nil {
+		panic(fmt.Sprintf("failed decoding currentTerm: %+v", err))
+	}
+
+	if err := d.Decode(&rf.votedFor); err != nil {
+		panic(fmt.Sprintf("failed decoding votedFor: %+v", err))
+	}
+
+	if err := d.Decode(&rf.log); err != nil {
+		panic(fmt.Sprintf("failed decoding log: %+v", err))
+	}
 }
 
 //
@@ -257,11 +279,13 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 			reply.VoteGranted = true
 			DPrintf("follower %d grant vote to %d at term %d", rf.me, args.CandiateID, rf.currentTerm)
 		}
+		rf.persist()
 	} else if rf.currentTerm == args.Term {
 		DPrintf("server %d comparing log size %d with lastLogTerm %d, lastLogIndex %d", rf.me, len(rf.log)+rf.log[0].Index, args.LastLogTerm, args.LastLogIndex)
 		if rf.votedFor == 0 && rf.compareLog(args.LastLogTerm, args.LastLogIndex) {
 			reply.VoteGranted = true
 			rf.votedFor = args.CandiateID + 1
+			rf.persist()
 			DPrintf("follower %d grant vote to %d at term %d", rf.me, args.CandiateID, rf.currentTerm)
 		}
 	} else if rf.currentTerm > args.Term { // ignore stale vote request
@@ -292,8 +316,10 @@ type AppendEntriesArgs struct {
 }
 
 type AppendEntriesReply struct {
-	Success bool
-	Term    int
+	Success         bool
+	Term            int
+	NextTryLogIndex int
+	NextTryLogTerm  int
 }
 
 // assume rf.mu lock hold
@@ -314,16 +340,18 @@ func (rf *Raft) getHBEntries() []*AppendEntriesArgs {
 		prevLogTerm := rf.log[prevLogIndex-offset].Term
 		logSz := len(rf.log) - nextIndex + offset
 		// logSz := len(rf.log[nextIndex-offset:])
-		DPrintf("leader %d copying log for %d calling make() && copy()", rf.me, i)
-		log := make([]LogEntry, logSz)
-		copy(log, rf.log[nextIndex-offset:])
-		DPrintf("leader %d copying log for %d calling make() && copy() end", rf.me, i)
-		entries[i] = &AppendEntriesArgs{
+		ent := &AppendEntriesArgs{
 			PrevLogIndex: prevLogIndex,
 			PrevLogTerm:  prevLogTerm,
-			Entries:      log,
 			LeaderCommit: rf.commitIndex,
 		}
+
+		DPrintf("leader %d copying log for %d calling make() && copy()", rf.me, i)
+		if logSz > 0 {
+			ent.Entries = make([]LogEntry, logSz)
+			copy(ent.Entries, rf.log[nextIndex-offset:])
+		}
+		entries[i] = ent
 		DPrintf("leader %d finish copying log for %d", rf.me, i)
 	}
 	DPrintf("leader %d finish preparing append entries at term %d", rf.me, rf.currentTerm)
@@ -370,6 +398,29 @@ func (rf *Raft) appendLog(prevLogIndex int, entries []LogEntry) bool {
 	return true
 }
 
+// TODO unit test me
+func (rf *Raft) findLogUpper(term int) *LogEntry {
+	s, e := 0, len(rf.log)
+
+	for s < e {
+		m := (s + e) / 2
+		if rf.log[m].Term > term {
+			e = m
+		} else { // rf.log[m] <= term
+			s = m + 1
+		}
+	}
+
+	if s == 0 {
+		DPrintf("incorrect upper of term %d, rf.log:", term)
+		for _, ent := range rf.log {
+			DPrintf("index: %d, term: %d\n", ent.Index, ent.Term)
+		}
+		panic("unreachable")
+	}
+	return &rf.log[s-1]
+}
+
 // rpc Implementation
 // TODO bisect optimization
 // TODO add case index mismatch, should reset election timer
@@ -386,12 +437,15 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		return
 	}
 
+	needPersist := false
+
 	// update currentTerm and convert to follower
 	// TODO if currentTerm == args.Term and role is candidate
 	// we should convert it to follower
 	// TODO add unit test to cover this situation
 	if rf.currentTerm < args.Term {
 		rf.currentTerm = args.Term
+		needPersist = true
 	}
 
 	if rf.role != RoleFollower {
@@ -405,10 +459,14 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	offset := rf.log[0].Index
 	prevLogIndex := args.PrevLogIndex
 	// make sure that prevLogIndex is in the range of rf.log
-	if prevLogIndex-offset < len(rf.log) {
+	if prevLogIndex >= offset && prevLogIndex < len(rf.log)+offset {
 		prevLogTerm := rf.log[prevLogIndex-offset].Term
 		if prevLogTerm == args.PrevLogTerm {
 			rf.appendLog(prevLogIndex, args.Entries)
+			if len(args.Entries) > 0 {
+				// TODO can be further optimized because appending log doesn't necessary change rf.log
+				needPersist = true
+			}
 			// DPrintf("follower %d append log from leader %d at term %d, prevLogIndex %d, entries: %+v, log after append: %+v", rf.me, args.LeaderID, rf.currentTerm, prevLogIndex, args.Entries, rf.log)
 			DPrintf("follower %d append log from leader %d at term %d, prevLogIndex %d", rf.me, args.LeaderID, rf.currentTerm, prevLogIndex)
 			if args.LeaderCommit > rf.commitIndex {
@@ -418,15 +476,37 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 				if newCommitIndex < rf.commitIndex {
 					panic(fmt.Sprintf("%s %d commited entries trunked from %d to %d", rf.role, rf.me, rf.commitIndex, newCommitIndex))
 				}
-				rf.doUpdateCommitIndex(newCommitIndex)
+
+				if newCommitIndex > rf.commitIndex {
+					rf.commitIndex = newCommitIndex
+					rf.tryApplyLog()
+				}
 			}
 
 			reply.Success = true
 		} else {
 			DPrintf("follower %d failed appending log beacause log term mismatch, log size %d, prevLogIndex %d", rf.me, len(rf.log)+offset, prevLogIndex)
+			if prevLogTerm < args.PrevLogTerm {
+				reply.NextTryLogIndex = prevLogIndex
+				reply.NextTryLogTerm = prevLogTerm
+			} else { // prevLogTerm > args.PrevLogTerm
+				ent := rf.findLogUpper(args.PrevLogTerm)
+				reply.NextTryLogIndex = ent.Index
+				reply.NextTryLogTerm = ent.Term
+			}
 		}
-	} else {
+	} else if prevLogIndex >= offset+len(rf.log) { // out of range
+		// fmt.Printf("server %d, testing leader prevLogIndex %d, prevLogTerm %d\n", rf.me, args.PrevLogIndex, args.PrevLogTerm)
+		// fmt.Printf("server %d log: %+v\n", rf.me, rf.log)
+		reply.NextTryLogIndex = len(rf.log) + rf.log[0].Index - 1
+		reply.NextTryLogTerm = rf.log[len(rf.log)-1].Term
 		DPrintf("follower %d failed appending log beacause log index mismatch, log size %d, prevLogIndex %d", rf.me, len(rf.log)+offset, prevLogIndex)
+	} else { // prevLogIndex < offset
+		panic("no implemented")
+	}
+
+	if needPersist {
+		rf.persist()
 	}
 
 	rf.mu.Unlock()
@@ -512,6 +592,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		Command: command,
 	}
 	rf.log = append(rf.log, ent)
+	rf.persist()
 	rf.nextIndex[rf.me] = index + 1
 	rf.matchIndex[rf.me] = index
 
@@ -530,9 +611,9 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 // should call killed() to check whether it should stop.
 //
 func (rf *Raft) Kill() {
+	atomic.StoreInt32(&rf.dead, 1)
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	atomic.StoreInt32(&rf.dead, 1)
 	// Your code here, if desired.
 	close(rf.applyCh)
 }
@@ -555,6 +636,7 @@ func (rf *Raft) ticker() {
 		// time.Sleep().
 		switch role {
 		case RoleFollower:
+			rf.tryApplyLog()
 			rf.mu.Unlock()
 			eto := getElectionTimeout()
 			rf.runFollower(term, eto)
@@ -564,6 +646,7 @@ func (rf *Raft) ticker() {
 			eto := getElectionTimeout()
 			rf.votedFor = rf.me + 1
 			rf.currentTerm++
+			rf.persist()
 			lastLogEnt := rf.log[len(rf.log)-1]
 			lastLogIndex := lastLogEnt.Index
 			lastLogTerm := lastLogEnt.Term
@@ -577,6 +660,7 @@ func (rf *Raft) ticker() {
 			start := time.Now()
 			to := LeaderIdlePeriod
 			argsList := rf.getHBEntries()
+			rf.tryApplyLog()
 			rf.mu.Unlock()
 			sendHBChan := make(chan hbParams, 1)
 			go rf.sendHeartbeat(term, sendHBChan, argsList, false)
@@ -712,13 +796,14 @@ func (rf *Raft) startElection(term int, voteResultChan chan struct{}, lastLogInd
 				rf.mu.Lock()
 				defer rf.mu.Unlock()
 
-				if reply.Term > term {
+				if reply.Term > term { // TODO do we need this?
 					// double check on currentTerm, beacause it might have been changed by other rpc
 					if reply.Term > rf.currentTerm {
 						DPrintf("candidate %d convert to follower and update term from %d to %d", rf.me, rf.currentTerm, reply.Term)
 						rf.currentTerm = reply.Term
 						rf.role = RoleFollower
 						rf.votedFor = 0
+						rf.persist()
 					}
 				}
 
@@ -763,11 +848,12 @@ WAIT:
 				rf.matchIndex[i] = 0
 			}
 
+			argList := rf.getHBEntries()
 			// TODO consider commit empty log if commitLogIndex lag behind lastLogIndex
 			// send empty heartbeat right away
 			rf.mu.Unlock()
 			sendHBChan := make(chan hbParams, 1)
-			rf.sendHeartbeat(term, sendHBChan, nil, true)
+			rf.sendHeartbeat(term, sendHBChan, argList, false)
 		} else {
 			DPrintf("candidate %d not become leader at term %d(vote term %d)", rf.me, rf.currentTerm, term)
 			rf.mu.Unlock()
@@ -797,6 +883,7 @@ WAIT:
 	}
 }
 
+// TODO remove redundant sendEmptyHB parameter
 func (rf *Raft) sendHeartbeat(term int, sendHBChan chan hbParams, appendArgsList []*AppendEntriesArgs, sendEmptyHB bool) {
 	for i := range rf.peers {
 		if i == rf.me {
@@ -823,26 +910,35 @@ func (rf *Raft) sendHeartbeat(term int, sendHBChan chan hbParams, appendArgsList
 			}
 
 			rf.mu.Lock()
-			if rf.currentTerm != term { // rf.currentTerm should have been updated
-				rf.mu.Unlock()
-				params := hbParams{
-					appendEntriesReply: *reply,
-				}
+			// if rf.currentTerm != term { // rf.currentTerm should have been updated
+			// 	rf.mu.Unlock()
+			// 	params := hbParams{
+			// 		appendEntriesReply: *reply,
+			// 	}
 
-				select {
-				case sendHBChan <- params:
-				case <-time.After(MinElectionTimeout * time.Millisecond):
-					DPrintf("leader %d timeout sending role update msg from %d at term %d, new term is %d", rf.me, server, term, reply.Term)
-				}
+			// 	select {
+			// 	case sendHBChan <- params:
+			// 	case <-time.After(MinElectionTimeout * time.Millisecond):
+			// 		DPrintf("leader %d timeout sending role update msg from %d at term %d, new term is %d", rf.me, server, term, reply.Term)
+			// 	}
 
-				return
-			}
-
+			// 	return
+			// }
 			// rf.currentTerm == term
-			if term < reply.Term {
-				rf.currentTerm = reply.Term
-				rf.role = RoleFollower
-				rf.votedFor = 0
+			if term < reply.Term { // TODO do we really need this?
+				// TODO unit test me
+				// rf.currentTerm might have been updated if we set rf.voteFor = 0
+				// or rf.currentTerm = reply.Term directly we might override exiting value
+				if rf.currentTerm < reply.Term {
+					rf.currentTerm = reply.Term
+					rf.role = RoleFollower
+					if rf.votedFor == rf.me+1 {
+						rf.votedFor = 0
+					}
+
+					rf.persist()
+				}
+
 				rf.mu.Unlock()
 				params := hbParams{
 					appendEntriesReply: *reply,
@@ -857,10 +953,18 @@ func (rf *Raft) sendHeartbeat(term int, sendHBChan chan hbParams, appendArgsList
 				return
 			}
 
-			if sendEmptyHB {
+			// role changed return directly
+			// TODO add unit test: role changed, and leader's log might got truncated
+			// if we proceed to append log, reply.NextTryLogIndex might exceed rf.log
+			if rf.currentTerm != term || rf.role != RoleLeader {
 				rf.mu.Unlock()
 				return
 			}
+
+			// if sendEmptyHB {
+			// 	rf.mu.Unlock()
+			// 	return
+			// }
 
 			// term >= reply.Term
 			if reply.Success {
@@ -869,6 +973,8 @@ func (rf *Raft) sendHeartbeat(term int, sendHBChan chan hbParams, appendArgsList
 				if rf.nextIndex[server] == args.PrevLogIndex+1 {
 					rf.nextIndex[server] += len(args.Entries)
 					// should avoid calling tryUpdateCommitIndex() too often!
+					// if rf.matchIndex[server] == rf.nextIndex[server]-1 that means
+					// nothing changed so we don't need perform commitIndex update
 					if rf.matchIndex[server] != rf.nextIndex[server]-1 {
 						rf.matchIndex[server] = rf.nextIndex[server] - 1
 						rf.tryUpdateCommitIndex()
@@ -880,7 +986,30 @@ func (rf *Raft) sendHeartbeat(term int, sendHBChan chan hbParams, appendArgsList
 				// log unmatch, decrease by one
 				// TODO optimize index matching algorithm
 				if rf.nextIndex[server] == args.PrevLogIndex+1 {
-					rf.nextIndex[server]--
+					// are we within legal range
+					offset := rf.log[0].Index
+					if reply.NextTryLogIndex >= offset && reply.NextTryLogIndex < offset+len(rf.log) {
+						nextTryLogTerm := rf.log[reply.NextTryLogIndex-offset].Term
+						if reply.NextTryLogTerm == nextTryLogTerm {
+							rf.nextIndex[server] = reply.NextTryLogIndex + 1
+							// fmt.Printf("leader log: %+v\n", rf.log)
+						} else if reply.NextTryLogTerm > nextTryLogTerm {
+							rf.nextIndex[server] = reply.NextTryLogIndex
+							// fmt.Printf("server %d next index of term %d is %d\n", server, reply.NextTryLogTerm, rf.nextIndex[server])
+						} else { // reply.NextTryLogIndex < nextTryLogTerm
+							ent := rf.findLogUpper(reply.NextTryLogTerm)
+							rf.nextIndex[server] = ent.Index + 1
+							// fmt.Printf("server %d find upper of %d: %+v\n", server, reply.NextTryLogTerm, ent)
+						}
+						// fmt.Printf("server %d nextIndex %d\n", server, rf.nextIndex[server])
+					} else if reply.NextTryLogIndex < offset {
+						// under flow
+						panic("no implemented")
+					} else { // reply.NextTryLogIndex >= offset + len(rf.log)
+						panic("unreachable")
+					}
+
+					// rf.nextIndex[server]--
 				} else {
 					DPrintf("leader %d failed to update nextIndex of %d beacause of mismatch, rf.nextIndex[server] %d, prevLogIndex %d", rf.me, server, rf.nextIndex[server], args.PrevLogIndex)
 				}
@@ -891,23 +1020,30 @@ func (rf *Raft) sendHeartbeat(term int, sendHBChan chan hbParams, appendArgsList
 }
 
 // assume rf.mu lock hold
-func (rf *Raft) doUpdateCommitIndex(newCommitIndex int) {
-	if newCommitIndex > rf.commitIndex {
+// TODO add ut: raft should gurrantee that commited entries are applied asap
+func (rf *Raft) tryApplyLog() {
+	DPrintf("server %d try applying log, commitIndex %d, lastApplied %d", rf.me, rf.commitIndex, rf.lastApplied)
+	if rf.commitIndex > rf.lastApplied && !rf.killed() {
 		offset := rf.log[0].Index
-		rf.commitIndex = newCommitIndex
 		for rf.lastApplied < rf.commitIndex {
 			index := rf.lastApplied + 1
 			msg := ApplyMsg{
 				CommandValid: true,
 				CommandIndex: index,
-				// Command:      rf.log[index-offset].Command,
+				Command:      rf.log[index-offset].Command,
 			}
 			DPrintf("server %d applying msg %+v at term %d", rf.me, msg, rf.currentTerm)
-			msg.Command = rf.log[index-offset].Command
-			rf.applyCh <- msg
-			rf.lastApplied++
+			// msg.Command = rf.log[index-offset].Command
+			select {
+			case rf.applyCh <- msg:
+				rf.lastApplied++
+			case <-time.After(LeaderIdlePeriod):
+				// TODO commit msg if lastApplied < rf.commitIndex
+				DPrintf("leader %d timeout commiting msg %d at term %d", rf.me, rf.lastApplied, rf.currentTerm)
+				return
+			}
 		}
-		DPrintf("server %d update commit index to %d at term %d, last applied: %d", rf.me, newCommitIndex, rf.currentTerm, rf.lastApplied)
+		DPrintf("server %d update commit index to %d at term %d, last applied: %d", rf.me, rf.commitIndex, rf.currentTerm, rf.lastApplied)
 	}
 }
 
@@ -927,8 +1063,9 @@ func (rf *Raft) tryUpdateCommitIndex() {
 	offset := rf.log[0].Index
 	ent := rf.log[newCommitIndex-offset]
 	// leader only commit log from current term
-	if ent.Term == rf.currentTerm {
-		rf.doUpdateCommitIndex(newCommitIndex)
+	if ent.Term == rf.currentTerm && newCommitIndex > rf.commitIndex {
+		rf.commitIndex = newCommitIndex
+		rf.tryApplyLog()
 	}
 	DPrintf("server %d finish updating commit index", rf.me)
 }
@@ -1011,6 +1148,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.hbChan = make(chan hbParams, 1)
 	rf.rvChan = make(chan rvParams, 1)
 	rf.applyCh = applyCh
+	rf.lastApplied = rf.log[0].Index
 	rf.nextIndex = make([]int, len(rf.peers))
 	rf.matchIndex = make([]int, len(rf.peers))
 	rf.rpcManager = &defaultRaftRPCManager{rf}
