@@ -88,28 +88,25 @@ type LogEntry struct {
 // A Go object implementing a single Raft peer.
 //
 type Raft struct {
-	mu            sync.Mutex          // Lock to protect shared access to this peer's state
-	peers         []*labrpc.ClientEnd // RPC end points of all peers
-	persister     *Persister          // Object to hold this peer's persisted state
-	me            int                 // this peer's index into peers[]
-	dead          int32               // set by Kill()
-	applyChClosed bool                // set by Kill()
+	mu        sync.Mutex          // Lock to protect shared access to this peer's state
+	peers     []*labrpc.ClientEnd // RPC end points of all peers
+	persister *Persister          // Object to hold this peer's persisted state
+	me        int                 // this peer's index into peers[]
+	dead      int32               // set by Kill()
 
 	// Your data here (2A, 2B, 2C).
 	// Look at the paper's Figure 2 for a description of what
 	// state a Raft server must maintain.
 	currentTerm int
 	votedFor    int
-	log         []*LogEntry
+	log         []LogEntry
 
 	// non-persistant field
-	role        RaftRole
-	hbChan      chan hbParams
-	rvChan      chan rvParams
-	applyCh     chan ApplyMsg
-	applyChLock sync.Mutex
-	commitCh    chan int
-	rpcManager  RaftRPCManager
+	role       RaftRole
+	hbChan     chan hbParams
+	rvChan     chan rvParams
+	applyCh    chan ApplyMsg
+	rpcManager RaftRPCManager
 
 	commitIndex int
 	lastApplied int
@@ -246,7 +243,7 @@ type hbParams struct {
 // assume rf.mu lock hold
 func (rf *Raft) compareLog(lastLogTerm int, lastLogIndex int) bool {
 	sz := len(rf.log)
-	ent := rf.log[sz-1]
+	ent := &rf.log[sz-1]
 
 	if ent.Term < lastLogTerm {
 		return true
@@ -314,7 +311,7 @@ type AppendEntriesArgs struct {
 	LeaderID     int
 	PrevLogIndex int
 	PrevLogTerm  int
-	Entries      []*LogEntry
+	Entries      []LogEntry
 	LeaderCommit int
 }
 
@@ -351,7 +348,7 @@ func (rf *Raft) getHBEntries() []*AppendEntriesArgs {
 
 		DPrintf("leader %d copying log for %d calling make() && copy()", rf.me, i)
 		if logSz > 0 {
-			ent.Entries = make([]*LogEntry, logSz)
+			ent.Entries = make([]LogEntry, logSz)
 			copy(ent.Entries, rf.log[nextIndex-offset:])
 		}
 		entries[i] = ent
@@ -371,7 +368,7 @@ func minInt(i, j int) int {
 }
 
 // assume rf.mu lock hold
-func (rf *Raft) appendLog(prevLogIndex int, entries []*LogEntry) bool {
+func (rf *Raft) appendLog(prevLogIndex int, entries []LogEntry) bool {
 	offset := rf.log[0].Index
 	sz := offset + len(rf.log)
 	start := prevLogIndex + 1
@@ -386,7 +383,7 @@ func (rf *Raft) appendLog(prevLogIndex int, entries []*LogEntry) bool {
 	end := minInt(sz, esz)
 	for i := start; i < end; i++ {
 		j := i - start
-		ent := entries[j]
+		ent := &entries[j]
 		if rf.log[i-offset].Term != ent.Term {
 			// fmt.Printf("mismatch and cut at %dth, j: %d, start: %d\n", i, j, i-offset-1)
 			rf.log = append(rf.log[:i-offset], entries[j:]...)
@@ -421,7 +418,7 @@ func (rf *Raft) findLogUpper(term int) *LogEntry {
 		}
 		panic("unreachable")
 	}
-	return rf.log[s-1]
+	return &rf.log[s-1]
 }
 
 // rpc Implementation
@@ -479,13 +476,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 				if newCommitIndex < rf.commitIndex {
 					panic(fmt.Sprintf("%s %d commited entries trunked from %d to %d", rf.role, rf.me, rf.commitIndex, newCommitIndex))
 				}
-				// rf.doUpdateCommitIndex(newCommitIndex)
-				rf.commitIndex = newCommitIndex
-				select {
-				case rf.commitCh <- newCommitIndex:
-				case <-time.After(32 * time.Millisecond):
-					DPrintf("follower %d timeout notifying new commit index %d at term %d", rf.me, newCommitIndex, rf.currentTerm)
-				}
+				rf.doUpdateCommitIndex(newCommitIndex)
 			}
 
 			reply.Success = true
@@ -591,7 +582,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 
 	index := rf.log[0].Index + len(rf.log)
 	term := rf.currentTerm
-	ent := &LogEntry{
+	ent := LogEntry{
 		Term:    term,
 		Index:   index,
 		Command: command,
@@ -616,11 +607,10 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 // should call killed() to check whether it should stop.
 //
 func (rf *Raft) Kill() {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
 	atomic.StoreInt32(&rf.dead, 1)
 	// Your code here, if desired.
-	rf.applyChLock.Lock()
-	defer rf.applyChLock.Unlock()
-	rf.applyChClosed = true
 	close(rf.applyCh)
 }
 
@@ -1021,92 +1011,9 @@ func (rf *Raft) sendHeartbeat(term int, sendHBChan chan hbParams, appendArgsList
 	}
 }
 
-func (rf *Raft) logCommiter() {
-	for !rf.killed() {
-		start := time.Now()
-		// TODO don't use magic number
-		to := 64 * time.Millisecond
-
-	AGAIN:
-		select {
-		case commitIndex := <-rf.commitCh:
-			if commitIndex <= rf.lastApplied {
-				// nothing to do, keep waiting
-				updateTO(&to, start)
-				goto AGAIN
-			}
-		case <-time.After(to):
-		}
-
-		rf.mu.Lock()
-		if rf.lastApplied >= rf.commitIndex {
-			rf.mu.Unlock()
-			continue
-		}
-
-		// copying logs that will be applied
-		// check for valid index
-		offset := rf.log[0].Index
-		nextApplyIndex := rf.lastApplied - offset + 1
-
-		// nextApplyIndex <= <-rf.commitIndex
-		if nextApplyIndex < 0 || nextApplyIndex >= len(rf.log) {
-			panic(fmt.Sprintf("impossible nextApplyIndex: %d, total log size: %d", rf.lastApplied+1, rf.log[len(rf.log)-1].Index))
-		}
-
-		if rf.commitIndex >= offset+len(rf.log) {
-			panic("impossible")
-		}
-
-		sz := rf.commitIndex - rf.lastApplied
-		logs := make([]*LogEntry, sz)
-		copy(logs, rf.log[nextApplyIndex:nextApplyIndex+sz])
-		term := rf.currentTerm
-		rf.mu.Unlock()
-		rf.applyLog(logs, term)
-	}
-}
-
-func (rf *Raft) applyLog(logs []*LogEntry, term int) {
-	rf.applyChLock.Lock()
-	defer rf.applyChLock.Unlock()
-
-	if rf.applyChClosed {
-		DPrintf("server %d stop applying log because applyCh closed.", rf.me)
-		return
-	}
-
-	retry := 3
-	for i := 0; i < len(logs); i++ {
-		log := logs[i]
-		if log.Index != rf.lastApplied+1 {
-			panic(fmt.Sprintf("impossible, log index: %d, lastApplied: %d", log.Index, rf.lastApplied))
-		}
-
-		msg := ApplyMsg{
-			CommandValid: true,
-			CommandIndex: log.Index,
-			Command:      log.Command,
-		}
-
-	RETRY:
-		for j := 0; j < retry; j++ {
-			DPrintf("server %d applying msg %+v at term %d", rf.me, msg, term)
-			select {
-			case rf.applyCh <- msg:
-				rf.lastApplied++
-				break RETRY
-			case <-time.After(128 * time.Millisecond):
-				DPrintf("leader %d timeout commiting msg %d at term %d", rf.me, log.Index, rf.currentTerm)
-			}
-		}
-	}
-}
-
 // assume rf.mu lock hold
 // TODO add ut: raft should gurrantee that commited entries are applied asap
-// TODO delete me later
-func (rf *Raft) _doUpdateCommitIndex(newCommitIndex int) {
+func (rf *Raft) doUpdateCommitIndex(newCommitIndex int) {
 	if newCommitIndex > rf.commitIndex && !rf.killed() {
 		offset := rf.log[0].Index
 		rf.commitIndex = newCommitIndex
@@ -1149,14 +1056,7 @@ func (rf *Raft) tryUpdateCommitIndex() {
 	ent := rf.log[newCommitIndex-offset]
 	// leader only commit log from current term
 	if ent.Term == rf.currentTerm {
-		// rf.doUpdateCommitIndex(newCommitIndex)
-		rf.commitIndex = newCommitIndex
-		select {
-		case rf.commitCh <- newCommitIndex:
-		case <-time.After(32 * time.Millisecond):
-			DPrintf("follower %d timeout notifying new commit index %d at term %d", rf.me, newCommitIndex, rf.currentTerm)
-		}
-
+		rf.doUpdateCommitIndex(newCommitIndex)
 	}
 	DPrintf("server %d finish updating commit index", rf.me)
 }
@@ -1226,7 +1126,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
 	if len(rf.log) == 0 {
-		nullEnt := &LogEntry{
+		nullEnt := LogEntry{
 			Index: 0,
 			Term:  0,
 		}
@@ -1238,13 +1138,11 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.role = RoleFollower
 	rf.hbChan = make(chan hbParams, 1)
 	rf.rvChan = make(chan rvParams, 1)
-	rf.commitCh = make(chan int, 1)
 	rf.applyCh = applyCh
 	rf.nextIndex = make([]int, len(rf.peers))
 	rf.matchIndex = make([]int, len(rf.peers))
 	rf.rpcManager = &defaultRaftRPCManager{rf}
 	go rf.ticker()
-	go rf.logCommiter()
 
 	return rf
 }
