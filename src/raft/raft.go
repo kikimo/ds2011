@@ -1023,7 +1023,7 @@ func (rf *Raft) sendHeartbeat(term int, sendHBChan chan hbParams, appendArgsList
 // TODO add ut: raft should gurrantee that commited entries are applied asap
 func (rf *Raft) tryApplyLog() {
 	DPrintf("server %d try applying log, commitIndex %d, lastApplied %d", rf.me, rf.commitIndex, rf.lastApplied)
-	if rf.commitIndex > rf.lastApplied {
+	if rf.commitIndex > rf.lastApplied && !rf.killed() {
 		offset := rf.log[0].Index
 		for rf.lastApplied < rf.commitIndex {
 			index := rf.lastApplied + 1
