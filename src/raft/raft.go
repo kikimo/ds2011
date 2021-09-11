@@ -112,7 +112,7 @@ type Raft struct {
 	rpcManager  RaftRPCManager
 
 	commitIndex int
-	lastApplied int64
+	lastApplied int
 
 	nextIndex  []int
 	matchIndex []int
@@ -482,6 +482,11 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 				// rf.doUpdateCommitIndex(newCommitIndex)
 				if rf.commitIndex < newCommitIndex {
 					rf.commitIndex = newCommitIndex
+					select {
+					case rf.commitCh <- newCommitIndex:
+					case <-time.After(32 * time.Millisecond):
+						DPrintf("follower %d timeout notifying new commit index %d at term %d", rf.me, newCommitIndex, rf.currentTerm)
+					}
 				}
 			}
 
@@ -511,10 +516,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		rf.persist()
 	}
 
-	// trigger log committing
-	commitIndex := rf.commitIndex
 	rf.mu.Unlock()
-	rf.tryTriggerLogApply(reply.Term, commitIndex)
 	params := hbParams{
 		appendEntriesArgs:  *args,
 		appendEntriesReply: *reply,
@@ -524,19 +526,6 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	case rf.hbChan <- params:
 	case <-time.After(MinElectionTimeout * time.Millisecond):
 		DPrintf("%s %d timeout sending heartbeat result at term %d", role, rf.me, reply.Term)
-	}
-}
-
-func (rf *Raft) tryTriggerLogApply(term int, commitIndex int) {
-	DPrintf("server %d try triggering log apply at term %d", rf.me, term)
-	lastApplied := int(atomic.LoadInt64(&rf.lastApplied))
-	if lastApplied < commitIndex {
-		select {
-		case rf.commitCh <- commitIndex:
-			DPrintf("server %d log apply triggered at term %d", rf.me, term)
-		case <-time.After(32 * time.Millisecond):
-			DPrintf("server %d timeout notifying new commit index %d at term %d", rf.me, commitIndex, term)
-		}
 	}
 }
 
@@ -678,10 +667,8 @@ func (rf *Raft) ticker() {
 			start := time.Now()
 			to := LeaderIdlePeriod
 			argsList := rf.getHBEntries()
-			commitIndex := rf.commitIndex
 			rf.mu.Unlock()
 			sendHBChan := make(chan hbParams, 1)
-			rf.tryTriggerLogApply(term, commitIndex)
 			go rf.sendHeartbeat(term, sendHBChan, argsList, false)
 			rf.runLeader(term, start, to, sendHBChan)
 
@@ -990,13 +977,11 @@ func (rf *Raft) sendHeartbeat(term int, sendHBChan chan hbParams, appendArgsList
 				// if rf.nextIndex[server] != args.PrevLogIndex+1, that means
 				// this is a stale result and we should ignore
 				if rf.nextIndex[server] == args.PrevLogIndex+1 {
-					if len(args.Entries) > 0 {
-						rf.nextIndex[server] += len(args.Entries)
-						// should avoid calling tryUpdateCommitIndex() too often!
-						if rf.matchIndex[server] != rf.nextIndex[server]-1 {
-							rf.matchIndex[server] = rf.nextIndex[server] - 1
-							rf.tryUpdateCommitIndex()
-						}
+					rf.nextIndex[server] += len(args.Entries)
+					// should avoid calling tryUpdateCommitIndex() too often!
+					if rf.matchIndex[server] != rf.nextIndex[server]-1 {
+						rf.matchIndex[server] = rf.nextIndex[server] - 1
+						rf.tryUpdateCommitIndex()
 					}
 				}
 
@@ -1047,8 +1032,7 @@ func (rf *Raft) logCommiter() {
 	AGAIN:
 		select {
 		case commitIndex := <-rf.commitCh:
-			lastApplied := int(atomic.LoadInt64(&rf.lastApplied))
-			if commitIndex <= lastApplied {
+			if commitIndex <= rf.lastApplied {
 				// nothing to do, keep waiting
 				updateTO(&to, start)
 				goto AGAIN
@@ -1057,8 +1041,7 @@ func (rf *Raft) logCommiter() {
 		}
 
 		rf.mu.Lock()
-		lastApplied := int(atomic.LoadInt64(&rf.lastApplied))
-		if lastApplied >= rf.commitIndex {
+		if rf.lastApplied >= rf.commitIndex {
 			rf.mu.Unlock()
 			continue
 		}
@@ -1066,7 +1049,7 @@ func (rf *Raft) logCommiter() {
 		// copying logs that will be applied
 		// check for valid index
 		offset := rf.log[0].Index
-		nextApplyIndex := lastApplied - offset + 1
+		nextApplyIndex := rf.lastApplied - offset + 1
 
 		// nextApplyIndex <= <-rf.commitIndex
 		if nextApplyIndex < 0 || nextApplyIndex >= len(rf.log) {
@@ -1077,7 +1060,7 @@ func (rf *Raft) logCommiter() {
 			panic("impossible")
 		}
 
-		sz := rf.commitIndex - lastApplied
+		sz := rf.commitIndex - rf.lastApplied
 		logs := make([]*LogEntry, sz)
 		copy(logs, rf.log[nextApplyIndex:nextApplyIndex+sz])
 		term := rf.currentTerm
@@ -1098,7 +1081,7 @@ func (rf *Raft) applyLog(logs []*LogEntry, term int) {
 	retry := 3
 	for i := 0; i < len(logs); i++ {
 		log := logs[i]
-		if log.Index != int(atomic.LoadInt64(&rf.lastApplied))+1 {
+		if log.Index != rf.lastApplied+1 {
 			panic(fmt.Sprintf("impossible, log index: %d, lastApplied: %d", log.Index, rf.lastApplied))
 		}
 
@@ -1113,7 +1096,7 @@ func (rf *Raft) applyLog(logs []*LogEntry, term int) {
 			DPrintf("server %d applying msg %+v at term %d", rf.me, msg, term)
 			select {
 			case rf.applyCh <- msg:
-				atomic.AddInt64(&rf.lastApplied, 1)
+				rf.lastApplied++
 				break RETRY
 			case <-time.After(128 * time.Millisecond):
 				DPrintf("leader %d timeout commiting msg %d at term %d", rf.me, log.Index, rf.currentTerm)
@@ -1125,31 +1108,31 @@ func (rf *Raft) applyLog(logs []*LogEntry, term int) {
 // assume rf.mu lock hold
 // TODO add ut: raft should gurrantee that commited entries are applied asap
 // TODO delete me later
-// func (rf *Raft) _doUpdateCommitIndex(newCommitIndex int) {
-// 	if newCommitIndex > rf.commitIndex && !rf.killed() {
-// 		offset := rf.log[0].Index
-// 		rf.commitIndex = newCommitIndex
-// 		for rf.lastApplied < rf.commitIndex {
-// 			index := rf.lastApplied + 1
-// 			msg := ApplyMsg{
-// 				CommandValid: true,
-// 				CommandIndex: index,
-// 				// Command:      rf.log[index-offset].Command,
-// 			}
-// 			DPrintf("server %d applying msg %+v at term %d", rf.me, msg, rf.currentTerm)
-// 			msg.Command = rf.log[index-offset].Command
-// 			select {
-// 			case rf.applyCh <- msg:
-// 				rf.lastApplied++
-// 			case <-time.After(4 * time.Millisecond):
-// 				// TODO commit msg if lastApplied < rf.commitIndex
-// 				DPrintf("leader %d timeout commiting msg %d at term %d", rf.me, rf.lastApplied, rf.currentTerm)
-// 				return
-// 			}
-// 		}
-// 		DPrintf("server %d update commit index to %d at term %d, last applied: %d", rf.me, newCommitIndex, rf.currentTerm, rf.lastApplied)
-// 	}
-// }
+func (rf *Raft) _doUpdateCommitIndex(newCommitIndex int) {
+	if newCommitIndex > rf.commitIndex && !rf.killed() {
+		offset := rf.log[0].Index
+		rf.commitIndex = newCommitIndex
+		for rf.lastApplied < rf.commitIndex {
+			index := rf.lastApplied + 1
+			msg := ApplyMsg{
+				CommandValid: true,
+				CommandIndex: index,
+				// Command:      rf.log[index-offset].Command,
+			}
+			DPrintf("server %d applying msg %+v at term %d", rf.me, msg, rf.currentTerm)
+			msg.Command = rf.log[index-offset].Command
+			select {
+			case rf.applyCh <- msg:
+				rf.lastApplied++
+			case <-time.After(4 * time.Millisecond):
+				// TODO commit msg if lastApplied < rf.commitIndex
+				DPrintf("leader %d timeout commiting msg %d at term %d", rf.me, rf.lastApplied, rf.currentTerm)
+				return
+			}
+		}
+		DPrintf("server %d update commit index to %d at term %d, last applied: %d", rf.me, newCommitIndex, rf.currentTerm, rf.lastApplied)
+	}
+}
 
 // call by leader
 // assume rf.mu lock hold
@@ -1171,7 +1154,11 @@ func (rf *Raft) tryUpdateCommitIndex() {
 		// rf.doUpdateCommitIndex(newCommitIndex)
 		if rf.commitIndex < newCommitIndex {
 			rf.commitIndex = newCommitIndex
-			rf.tryTriggerLogApply(rf.currentTerm, rf.commitIndex)
+			select {
+			case rf.commitCh <- newCommitIndex:
+			case <-time.After(32 * time.Millisecond):
+				DPrintf("follower %d timeout notifying new commit index %d at term %d", rf.me, newCommitIndex, rf.currentTerm)
+			}
 		}
 	}
 	DPrintf("server %d finish updating commit index", rf.me)
