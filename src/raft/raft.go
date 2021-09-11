@@ -1139,6 +1139,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.hbChan = make(chan hbParams, 1)
 	rf.rvChan = make(chan rvParams, 1)
 	rf.applyCh = applyCh
+	rf.lastApplied = rf.log[0].Index
 	rf.nextIndex = make([]int, len(rf.peers))
 	rf.matchIndex = make([]int, len(rf.peers))
 	rf.rpcManager = &defaultRaftRPCManager{rf}
