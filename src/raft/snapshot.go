@@ -92,6 +92,8 @@ func (rf *Raft) CondInstallSnapshot(lastIncludedTerm int, lastIncludedIndex int,
 	}
 
 	// update raft state and snapshot
+	rf.lastApplied = lastIncludedIndex
+	rf.commitIndex = lastIncludedIndex
 	rf.snapshot = snapshot
 	rf.persist(true)
 

@@ -323,6 +323,11 @@ func (rf *Raft) getHBEntries() []*AppendEntriesArgs {
 
 		DPrintf("leader %d copying log for %d", rf.me, i)
 		offset := rf.log[0].Index
+		// check underflow, rf.log[0] might have changed after raft take a new snapshot
+		if rf.nextIndex[i]-offset <= 0 {
+			rf.nextIndex[i] = offset + 1
+		}
+
 		nextIndex := rf.nextIndex[i]
 		prevLogIndex := nextIndex - 1
 		prevLogTerm := rf.log[prevLogIndex-offset].Term
@@ -1084,6 +1089,12 @@ func (rf *Raft) tryUpdateCommitIndex() {
 
 	newCommitIndex := matchIndex[sz/2]
 	offset := rf.log[0].Index
+	// be careful of underflow, the computed newCommitIndex might lag far behind offset
+	if newCommitIndex <= offset {
+		DPrintf("server %d newCommitIndex %d, offset %d", rf.me, newCommitIndex, offset)
+		return
+	}
+
 	ent := rf.log[newCommitIndex-offset]
 	// leader only commit log from current term
 	if ent.Term == rf.currentTerm && newCommitIndex > rf.commitIndex {
@@ -1172,6 +1183,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.rvChan = make(chan rvParams, 1)
 	rf.applyCh = applyCh
 	rf.lastApplied = rf.log[0].Index
+	rf.commitIndex = rf.log[0].Index
 	rf.nextIndex = make([]int, len(rf.peers))
 	rf.matchIndex = make([]int, len(rf.peers))
 	rf.rpcManager = &defaultRaftRPCManager{rf}
