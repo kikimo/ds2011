@@ -405,6 +405,7 @@ func (rf *Raft) findLogUpper(term int) *LogEntry {
 		}
 	}
 
+	// TODO unit test me for this case
 	if s > 0 {
 		s--
 	}
@@ -416,7 +417,7 @@ func (rf *Raft) findLogUpper(term int) *LogEntry {
 	// 	}
 	// 	panic("unreachable")
 	// }
-	return rf.log[s-1]
+	return rf.log[s]
 }
 
 // rpc Implementation
@@ -501,8 +502,13 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		reply.NextTryLogIndex = len(rf.log) + rf.log[0].Index - 1
 		reply.NextTryLogTerm = rf.log[len(rf.log)-1].Term
 		DPrintf("follower %d failed appending log beacause log index mismatch, log size %d, prevLogIndex %d", rf.me, len(rf.log)+offset, prevLogIndex)
-	} else { // prevLogIndex < offset
-		panic("unreachable")
+	} else {
+		// prevLogIndex < offset
+		// follower take snapshot?
+		// TODO unit test me
+		// panic("unreachable")
+		reply.NextTryLogIndex = len(rf.log) + rf.log[0].Index - 1
+		reply.NextTryLogTerm = rf.log[len(rf.log)-1].Term
 	}
 
 	if needUpdate {
