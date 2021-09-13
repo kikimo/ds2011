@@ -1013,31 +1013,47 @@ func (rf *Raft) sendHeartbeat(term int, sendHBChan chan hbParams, appendArgsList
 							// fmt.Printf("server %d next index of term %d is %d\n", server, reply.NextTryLogTerm, rf.nextIndex[server])
 						} else { // reply.NextTryLogTerm < nextTryLogTerm
 							ent := rf.findLogUpper(reply.NextTryLogTerm)
-							rf.nextIndex[server] = ent.Index + 1
+							if rf.nextIndex[server] != ent.Index+1 {
+								rf.nextIndex[server] = ent.Index + 1
+							}
+
+							if ent.Term != reply.NextTryLogTerm {
+								// FIXME why ent.Term != reply.NextTryLogTerm in TestFigure82C
+								// when we are not enabling log compaction? One situation is that
+								// log entry of term reply.NextTryLogTerm and rf.NextTryLogIndex
+								// is discarded, eg:
+								// index: 			1 2 3
+								// leader term:     3 5 5
+								// follower term:   3 3 4
+								// follower.log[3] is discarded so ent.Term != reply.NextTryLogTerm
+								rf.sendSnapshot(server)
+							}
+							// TODO might need to install snapshot here
 							// fmt.Printf("server %d find upper of %d: %+v\n", server, reply.NextTryLogTerm, ent)
 						}
 						// fmt.Printf("server %d nextIndex %d\n", server, rf.nextIndex[server])
 					} else if reply.NextTryLogIndex < offset {
 						// follower log lag behind, install snapshot
 						// TODO avoid too many calls
-						snapshot := make([]byte, len(rf.snapshot))
-						copy(snapshot, rf.snapshot)
-						snapshotArgs := &InstallSnapshotArgs{
-							Term:              rf.currentTerm,
-							LeaderID:          rf.me,
-							LastIncludedIndex: rf.log[0].Index,
-							LastIncludedTerm:  rf.log[0].Term,
-							Data:              snapshot,
-						}
-						snapshotReply := &InstallSnapshotReply{}
-						go func(snapshotArgs *InstallSnapshotArgs, snapshotReply *InstallSnapshotReply, term int) {
-							if rf.sendInstallSnapshot(server, snapshotArgs, snapshotReply) {
-								DPrintf("leader %d failed calling sendInstallSnapshot at term %d", rf.me, term)
-								return
-							}
+						rf.sendSnapshot(server)
+						// snapshot := make([]byte, len(rf.snapshot))
+						// copy(snapshot, rf.snapshot)
+						// snapshotArgs := &InstallSnapshotArgs{
+						// 	Term:              rf.currentTerm,
+						// 	LeaderID:          rf.me,
+						// 	LastIncludedIndex: rf.log[0].Index,
+						// 	LastIncludedTerm:  rf.log[0].Term,
+						// 	Data:              snapshot,
+						// }
+						// snapshotReply := &InstallSnapshotReply{}
+						// go func(snapshotArgs *InstallSnapshotArgs, snapshotReply *InstallSnapshotReply, term int) {
+						// 	if rf.sendInstallSnapshot(server, snapshotArgs, snapshotReply) {
+						// 		DPrintf("leader %d failed calling sendInstallSnapshot at term %d", rf.me, term)
+						// 		return
+						// 	}
 
-							// TODO check reply term and persist if necessary
-						}(snapshotArgs, snapshotReply, rf.currentTerm)
+						// 	// TODO check reply term and persist if necessary
+						// }(snapshotArgs, snapshotReply, rf.currentTerm)
 						// panic("no implemented")
 					} else { // reply.NextTryLogIndex >= offset + len(rf.log)
 						panic("unreachable")
@@ -1051,6 +1067,28 @@ func (rf *Raft) sendHeartbeat(term int, sendHBChan chan hbParams, appendArgsList
 			}
 		}(i, args, reply)
 	}
+}
+
+// assume rf.mu lock hold
+func (rf *Raft) sendSnapshot(server int) {
+	snapshot := make([]byte, len(rf.snapshot))
+	copy(snapshot, rf.snapshot)
+	snapshotArgs := &InstallSnapshotArgs{
+		Term:              rf.currentTerm,
+		LeaderID:          rf.me,
+		LastIncludedIndex: rf.log[0].Index,
+		LastIncludedTerm:  rf.log[0].Term,
+		Data:              snapshot,
+	}
+	snapshotReply := &InstallSnapshotReply{}
+	go func(snapshotArgs *InstallSnapshotArgs, snapshotReply *InstallSnapshotReply, term int) {
+		if rf.sendInstallSnapshot(server, snapshotArgs, snapshotReply) {
+			DPrintf("leader %d failed calling sendInstallSnapshot at term %d", rf.me, term)
+			return
+		}
+
+		// TODO check reply term and persist if necessary
+	}(snapshotArgs, snapshotReply, rf.currentTerm)
 }
 
 // assume rf.mu lock hold
