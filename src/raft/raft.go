@@ -857,7 +857,11 @@ WAIT:
 			nextIndex := rf.log[0].Index + len(rf.log)
 			for i := 0; i < len(rf.peers); i++ {
 				rf.nextIndex[i] = nextIndex
-				rf.matchIndex[i] = 0
+				if i != rf.me {
+					rf.matchIndex[i] = 0
+				} else {
+					rf.matchIndex[i] = nextIndex - 1
+				}
 			}
 
 			argList := rf.getHBEntries()
