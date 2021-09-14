@@ -485,7 +485,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 			reply.Success = true
 		} else {
-			DPrintf("follower %d failed appending log beacause log term mismatch, log size %d, prevLogIndex %d", rf.me, len(rf.log)+offset, prevLogIndex)
+			DPrintf("follower %d failed appending log beacause log term mismatch, log size %d, offset: %d, prevLogIndex %d", rf.me, len(rf.log)+offset, offset, prevLogIndex)
 			if prevLogTerm < args.PrevLogTerm {
 				reply.NextTryLogIndex = prevLogIndex
 				reply.NextTryLogTerm = prevLogTerm
