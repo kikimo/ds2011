@@ -89,7 +89,21 @@ func (rf *Raft) CondInstallSnapshot(lastIncludedTerm int, lastIncludedIndex int,
 			},
 		}
 	} else {
+		// TODO unit test me: don't forget to override rf.log[0] in this case
 		rf.log = rf.log[pos:]
+		// override term of rf.log[0]
+		if rf.log[0].Index != lastIncludedIndex {
+			DPrintf("server %d fatal, log offset do not match leader, offset %d and term %d, leader index %d and term %d", rf.me, rf.log[0].Index, rf.log[0].Term, lastIncludedIndex, lastIncludedTerm)
+			rf.log[0].Index = lastIncludedIndex
+			// truncate all entries after rf.log[0]
+			rf.log = rf.log[:1]
+		}
+
+		if rf.log[0].Term != lastIncludedTerm {
+			rf.log[0].Term = lastIncludedTerm
+			// truncate all entries after rf.log[0]
+			rf.log = rf.log[:1]
+		}
 	}
 
 	// update raft state and snapshot
