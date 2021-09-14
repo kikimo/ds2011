@@ -80,6 +80,7 @@ func (rf *Raft) CondInstallSnapshot(lastIncludedTerm int, lastIncludedIndex int,
 		panic(fmt.Sprintf("server %d imposible lastIncludedTerm %d, lastIncludedIndex %d, log: %+v", rf.me, lastIncludedTerm, lastIncludedIndex, rf.log))
 	}
 
+	DPrintf("server %d installing snapshot at term %d, lastIncludedIndex %d, lastIncludedTerm %d, lastApplied before update %d, commitIndex before update %d", rf.me, rf.currentTerm, lastIncludedIndex, lastIncludedTerm, rf.lastApplied, rf.commitIndex)
 	if pos >= len(rf.log) {
 		rf.log = []*LogEntry{
 			{
@@ -128,6 +129,7 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 
 	rf.snapshot = snapshot
 	rf.log = rf.log[pos:]
+
 	// persist raft state with snapshot
 	rf.persist(true)
 }
