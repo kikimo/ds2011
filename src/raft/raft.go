@@ -1086,7 +1086,7 @@ func (rf *Raft) sendSnapshot(server int) {
 	}
 	snapshotReply := &InstallSnapshotReply{}
 	go func(snapshotArgs *InstallSnapshotArgs, snapshotReply *InstallSnapshotReply, term int) {
-		if rf.sendInstallSnapshot(server, snapshotArgs, snapshotReply) {
+		if !rf.sendInstallSnapshot(server, snapshotArgs, snapshotReply) {
 			DPrintf("leader %d failed calling sendInstallSnapshot at term %d", rf.me, term)
 			return
 		}
