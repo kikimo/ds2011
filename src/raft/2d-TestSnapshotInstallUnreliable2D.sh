@@ -13,6 +13,6 @@
 # go test -race -failfast -run 2B -v -timeout 0 -count 2 2>chan.out
 # go test -race -failfast -run 2C -v -timeout 0 -count 2 2>chan.out
 
-go test -race -failfast -run TestSnapshotInstallUnreliable2D -v -timeout 0 -count 8 -memprofile mem.out
+go test -race -failfast -run TestSnapshotInstallUnreliable2D -v -timeout 0 -count 32 -memprofile mem.out | tee TestSnapshotInstallUnreliable2D.leak.log
 # go test -race -failfast -run TestSnapshotInstallUnreliable2D -v -timeout 0 -count 8
 
