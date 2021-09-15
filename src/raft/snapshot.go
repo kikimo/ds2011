@@ -90,7 +90,8 @@ func (rf *Raft) CondInstallSnapshot(lastIncludedTerm int, lastIncludedIndex int,
 		}
 	} else {
 		// TODO unit test me: don't forget to override rf.log[0] in this case
-		rf.log = rf.log[pos:]
+		// rf.log = rf.log[pos:]
+		rf.log = copyLog(rf.log[pos:])
 		// override term of rf.log[0]
 		if rf.log[0].Index != lastIncludedIndex {
 			DPrintf("server %d fatal, log offset do not match leader, offset %d and term %d, leader index %d and term %d", rf.me, rf.log[0].Index, rf.log[0].Term, lastIncludedIndex, lastIncludedTerm)
@@ -113,6 +114,14 @@ func (rf *Raft) CondInstallSnapshot(lastIncludedTerm int, lastIncludedIndex int,
 	rf.persist(true)
 
 	return true
+}
+
+func copyLog(ents []*LogEntry) []*LogEntry {
+	sz := len(ents)
+	replica := make([]*LogEntry, sz)
+	copy(replica, ents)
+
+	return replica
 }
 
 func (rf *Raft) sendInstallSnapshot(server int, args *InstallSnapshotArgs, reply *InstallSnapshotReply) bool {
@@ -142,7 +151,8 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	}
 
 	rf.snapshot = snapshot
-	rf.log = rf.log[pos:]
+	// rf.log = rf.log[pos:]
+	rf.log = copyLog(rf.log[pos:])
 
 	// persist raft state with snapshot
 	rf.persist(true)

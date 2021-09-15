@@ -379,7 +379,9 @@ func (rf *Raft) appendLog(prevLogIndex int, entries []*LogEntry) bool {
 		ent := entries[j]
 		if rf.log[i-offset].Term != ent.Term {
 			// fmt.Printf("mismatch and cut at %dth, j: %d, start: %d\n", i, j, i-offset-1)
-			rf.log = append(rf.log[:i-offset], entries[j:]...)
+			// FIXME log leak
+			// rf.log = append(rf.log[:i-offset], entries[j:]...)
+			rf.log = append(copyLog(rf.log[:i-offset]), entries[j:]...)
 			return false
 		}
 	}
