@@ -14,7 +14,7 @@ type raftStatus struct {
 	numPeers int
 	term     int
 	votedFor int
-	log      []LogEntry
+	log      []*LogEntry
 	role     RaftRole
 }
 
@@ -38,6 +38,11 @@ type fakeRaftRPCManager struct {
 	voteLock              sync.Mutex
 	requestVoteReplies    []*testRequestVoteReply
 	requestVoteIndex      int
+}
+
+func (rf *fakeRaftRPCManager) InstallSnapshot(server int, args *InstallSnapshotArgs, reply *InstallSnapshotReply) bool {
+	// TODO
+	return false
 }
 
 func (m *fakeRaftRPCManager) SendRequestVote(server int, args *RequestVoteArgs, reply *RequestVoteReply) bool {
@@ -84,7 +89,7 @@ func newTestRaft(status *raftStatus) *Raft {
 	rf := &Raft{}
 	rf.log = status.log
 	if len(rf.log) == 0 {
-		nullEnt := LogEntry{
+		nullEnt := &LogEntry{
 			Index: 0,
 			Term:  0,
 		}
@@ -730,7 +735,7 @@ func TestCompareLogUT(t *testing.T) {
 			lastLogTerm:  3,
 			lastLogIndex: 4,
 			rfStatus: &raftStatus{
-				log: []LogEntry{
+				log: []*LogEntry{
 					{
 						Term:  3,
 						Index: 4,
@@ -744,7 +749,7 @@ func TestCompareLogUT(t *testing.T) {
 			lastLogTerm:  4,
 			lastLogIndex: 3,
 			rfStatus: &raftStatus{
-				log: []LogEntry{
+				log: []*LogEntry{
 					{
 						Term:  3,
 						Index: 4,
@@ -758,7 +763,7 @@ func TestCompareLogUT(t *testing.T) {
 			lastLogTerm:  2,
 			lastLogIndex: 5,
 			rfStatus: &raftStatus{
-				log: []LogEntry{
+				log: []*LogEntry{
 					{
 						Term:  3,
 						Index: 4,
@@ -787,7 +792,7 @@ func TestAppendLogUT(t *testing.T) {
 	cases := []struct {
 		name         string
 		prevLogIndex int
-		entries      []LogEntry
+		entries      []*LogEntry
 		match        bool
 		size         int
 		rfStatus     *raftStatus
@@ -795,7 +800,7 @@ func TestAppendLogUT(t *testing.T) {
 		{
 			name:         "all match and longer",
 			prevLogIndex: 2,
-			entries: []LogEntry{
+			entries: []*LogEntry{
 				{
 					Index: 3,
 					Term:  4,
@@ -808,7 +813,7 @@ func TestAppendLogUT(t *testing.T) {
 			match: true,
 			size:  4,
 			rfStatus: &raftStatus{
-				log: []LogEntry{
+				log: []*LogEntry{
 					{
 						Index: 1,
 						Term:  2,
@@ -827,7 +832,7 @@ func TestAppendLogUT(t *testing.T) {
 		{
 			name:         "all match and shorter",
 			prevLogIndex: 2,
-			entries: []LogEntry{
+			entries: []*LogEntry{
 				{
 					Index: 3,
 					Term:  4,
@@ -835,7 +840,7 @@ func TestAppendLogUT(t *testing.T) {
 			},
 			match: true,
 			rfStatus: &raftStatus{
-				log: []LogEntry{
+				log: []*LogEntry{
 					{
 						Index: 1,
 						Term:  2,
@@ -860,7 +865,7 @@ func TestAppendLogUT(t *testing.T) {
 			name:         "mismatch and longer",
 			size:         4,
 			prevLogIndex: 1,
-			entries: []LogEntry{
+			entries: []*LogEntry{
 				{
 					Index: 2,
 					Term:  3,
@@ -876,7 +881,7 @@ func TestAppendLogUT(t *testing.T) {
 			},
 			match: false,
 			rfStatus: &raftStatus{
-				log: []LogEntry{
+				log: []*LogEntry{
 					{
 						Index: 1,
 						Term:  2,
@@ -896,7 +901,7 @@ func TestAppendLogUT(t *testing.T) {
 			name:         "mismatch and shorter",
 			size:         3,
 			prevLogIndex: 1,
-			entries: []LogEntry{
+			entries: []*LogEntry{
 				{
 					Index: 2,
 					Term:  3,
@@ -908,7 +913,7 @@ func TestAppendLogUT(t *testing.T) {
 			},
 			match: false,
 			rfStatus: &raftStatus{
-				log: []LogEntry{
+				log: []*LogEntry{
 					{
 						Index: 1,
 						Term:  2,
