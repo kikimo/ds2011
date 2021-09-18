@@ -1040,6 +1040,7 @@ func (rf *Raft) sendHeartbeat(term int, sendHBChan chan hbParams, appendArgsList
 					} else if reply.NextTryLogIndex < offset {
 						// follower log lag behind, install snapshot
 						// TODO avoid too many calls
+						// TODO check why 2c trigger sendSnapshot() important
 						rf.sendSnapshot(server)
 						// snapshot := make([]byte, len(rf.snapshot))
 						// copy(snapshot, rf.snapshot)

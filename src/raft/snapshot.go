@@ -23,6 +23,10 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 
+	if rf.killed() {
+		DPrintf("server %d killed at term %d, return from install snapshot", rf.me, rf.currentTerm)
+	}
+
 	reply.Term = rf.currentTerm
 	if args.Term < rf.currentTerm {
 		return
@@ -51,6 +55,7 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 	}
 
 	select {
+	// TODO check applyCh before send msg
 	case rf.applyCh <- msg:
 		DPrintf("server %d sent snapshot at term %d from leader %d, server shoud invoke CondInstallSnapshot() to finish the update", rf.me, rf.currentTerm, args.LeaderID)
 	case <-time.After(MaxElectionTimeout * time.Millisecond):
