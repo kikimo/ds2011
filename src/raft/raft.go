@@ -151,9 +151,17 @@ func (rf *Raft) persist(withSnapshot bool) {
 	// rf.persister.SaveRaftState(data)
 	w := new(bytes.Buffer)
 	e := labgob.NewEncoder(w)
-	e.Encode(rf.currentTerm)
-	e.Encode(rf.votedFor)
-	e.Encode(rf.log)
+	if err := e.Encode(rf.currentTerm); err != nil {
+		panic(fmt.Sprintf("failed encoding currentTerm: %+v", err))
+	}
+
+	if err := e.Encode(rf.votedFor); err != nil {
+		panic(fmt.Sprintf("failed encoding votedFor: %+v", err))
+	}
+
+	if err := e.Encode(rf.log); err != nil {
+		panic(fmt.Sprintf("failed encoding rf.log: %+v", err))
+	}
 	data := w.Bytes()
 
 	if !withSnapshot {
