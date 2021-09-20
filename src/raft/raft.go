@@ -48,7 +48,8 @@ const (
 	// but the test limits us to send no more than 10 AppendEntries per second, setting
 	// so we set idle period to 64ms(more than 10 AppendEntries per second, but it works).
 	// LeaderIdlePeriod        = ((MaxElectionTimeout + MinElectionTimeout) / 2 / 10) * time.Millisecond
-	LeaderIdlePeriod        = 64 * time.Millisecond
+	// LeaderIdlePeriod        = 64 * time.Millisecond
+	LeaderIdlePeriod        = 128 * time.Millisecond
 	ElectionTimeoutInterval = MaxElectionTimeout - MinElectionTimeout
 
 	// note: setting leader idle period equal to election time will greatly
@@ -104,11 +105,13 @@ type Raft struct {
 	snapshot []byte
 
 	// non-persistant field
-	role       RaftRole
-	hbChan     chan hbParams
-	rvChan     chan rvParams
-	applyCh    chan ApplyMsg
-	rpcManager RaftRPCManager
+	role          RaftRole
+	hbChan        chan hbParams
+	rvChan        chan rvParams
+	appendLogChan chan struct{}
+	applyCh       chan ApplyMsg
+	lastHB        time.Time
+	rpcManager    RaftRPCManager
 
 	commitIndex int
 	lastApplied int
@@ -585,9 +588,9 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	// Your code here (2B).
 	rf.mu.Lock()
-	defer rf.mu.Unlock()
 	isLeader := rf.role == RoleLeader
 	if !isLeader {
+		rf.mu.Unlock()
 		return -1, -1, false
 	}
 
@@ -602,6 +605,27 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	rf.persist(false)
 	rf.nextIndex[rf.me] = index + 1
 	rf.matchIndex[rf.me] = index
+	lastHB := rf.lastHB
+	rf.mu.Unlock()
+
+	go func() {
+		time.Sleep(8 * time.Millisecond)
+		rf.mu.Lock()
+		latestHb := rf.lastHB
+		rf.mu.Unlock()
+
+		// we've got sent
+		if lastHB != latestHb {
+			return
+		}
+
+		select {
+		case rf.appendLogChan <- struct{}{}:
+			DPrintf("leader %d tirgger log appending", rf.me)
+		case <-time.After(LeaderIdlePeriod):
+			DPrintf("leader %d timeout triggering log appending", rf.me)
+		}
+	}()
 
 	return index, term, isLeader
 }
@@ -669,6 +693,7 @@ func (rf *Raft) ticker() {
 			to := LeaderIdlePeriod
 			argsList := rf.getHBEntries()
 			rf.tryApplyLog()
+			rf.lastHB = time.Now()
 			rf.mu.Unlock()
 			sendHBChan := make(chan hbParams, 1)
 			go rf.sendHeartbeat(term, sendHBChan, argsList, false)
@@ -868,6 +893,7 @@ WAIT:
 			argList := rf.getHBEntries()
 			// TODO consider commit empty log if commitLogIndex lag behind lastLogIndex
 			// send empty heartbeat right away
+			rf.lastHB = time.Now()
 			rf.mu.Unlock()
 			sendHBChan := make(chan hbParams, 1)
 			rf.sendHeartbeat(term, sendHBChan, argList, false)
@@ -1022,7 +1048,10 @@ func (rf *Raft) sendHeartbeat(term int, sendHBChan chan hbParams, appendArgsList
 								rf.nextIndex[server] = ent.Index + 1
 							}
 
-							if ent.Term != reply.NextTryLogTerm {
+							// TODO unit test me, if term mismatch, we should further test
+							// whether we reach the very begining of rf.log
+							if ent.Term != reply.NextTryLogTerm && ent.Index == rf.log[0].Index {
+								DPrintf("leader %d sending snapshot, because, ent: %+v, and reply: %+v", rf.me, *ent, *reply)
 								// FIXME why ent.Term != reply.NextTryLogTerm in TestFigure82C
 								// when we are not enabling log compaction? One situation is that
 								// log entry of term reply.NextTryLogTerm and rf.NextTryLogIndex
@@ -1164,6 +1193,10 @@ WAIT:
 	case <-time.After(to):
 		// now send heart beat again
 
+	case <-rf.appendLogChan:
+		// TODO rate limit
+		// append log, right now!
+
 	case params := <-sendHBChan:
 		if params.appendEntriesReply.Term > term {
 			return
@@ -1231,6 +1264,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.role = RoleFollower
 	rf.hbChan = make(chan hbParams, 1)
 	rf.rvChan = make(chan rvParams, 1)
+	rf.appendLogChan = make(chan struct{}, 1)
 	rf.applyCh = applyCh
 	rf.lastApplied = rf.log[0].Index
 	rf.commitIndex = rf.log[0].Index
