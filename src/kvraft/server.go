@@ -1,12 +1,16 @@
 package kvraft
 
 import (
+	"fmt"
+	"log"
+	"reflect"
+	"sync"
+	"sync/atomic"
+	"time"
+
 	"6.824/labgob"
 	"6.824/labrpc"
 	"6.824/raft"
-	"log"
-	"sync"
-	"sync/atomic"
 )
 
 const Debug = false
@@ -18,11 +22,31 @@ func DPrintf(format string, a ...interface{}) (n int, err error) {
 	return
 }
 
-
 type Op struct {
 	// Your definitions here.
 	// Field names must start with capital letters,
 	// otherwise RPC will break.
+	ClerkID ClerkID
+	SeqID   SeqID
+	OpCode  string
+	Key     string
+	Value   string // empty if Oprand is Get
+	Term    int
+}
+
+type ClerkInfo struct {
+	clerkID ClerkID
+	seqID   SeqID
+}
+
+type OpAgent struct {
+	cmd      Op
+	resultCh chan OpResult
+}
+
+type OpResult struct {
+	Err   Err
+	Value string
 }
 
 type KVServer struct {
@@ -35,15 +59,180 @@ type KVServer struct {
 	maxraftstate int // snapshot if log grows this big
 
 	// Your definitions here.
+	clerks    map[ClerkID]*ClerkInfo
+	store     map[string]string
+	resultMap map[int]*OpAgent
 }
 
+func (kv *KVServer) testClerkSeqID(clerkID ClerkID, seqID SeqID) bool {
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+
+	if _, ok := kv.clerks[clerkID]; !ok {
+		return true
+	}
+
+	clerk := kv.clerks[clerkID]
+	return clerk.seqID < seqID
+}
+
+// assume kv.mu lock hold
+func (kv *KVServer) tryUpdateClerkSeqID(clerkID ClerkID, seqID SeqID) bool {
+	if _, ok := kv.clerks[clerkID]; !ok {
+		kv.clerks[clerkID] = &ClerkInfo{
+			clerkID: clerkID,
+			seqID:   0,
+		}
+	}
+
+	clerk := kv.clerks[clerkID]
+	if clerk.seqID == seqID {
+		DPrintf("duplicated request of clerk %d with seqID %d found", clerkID, seqID)
+		return false
+	}
+
+	if clerk.seqID > seqID {
+		DPrintf("stale request of clerk %d with seqID %d found", clerkID, seqID)
+		return false
+	}
+
+	clerk.seqID = seqID
+	return true
+}
+
+// assume kv.mu lock hold
+func (kv *KVServer) prepareWaitingForResult(agent *OpAgent, index int) {
+	if opAgent, ok := kv.resultMap[index]; ok {
+		// DPrintf("clerk %d override stale command of %d at index %d of term %d at term %d", clerkID, opAgent.op.ClerkID, op)
+		DPrintf("clerk %d override stale command at index %d at term %d", agent.cmd.ClerkID, index, agent.cmd.Term)
+		go func() {
+			result := OpResult{
+				Err: ErrLeaderChange,
+			}
+			select {
+			case opAgent.resultCh <- result:
+			case <-time.After(raft.MaxElectionTimeout * time.Millisecond):
+				DPrintf("failed notifying cleirnt of leader change")
+			}
+		}()
+	}
+
+	kv.resultMap[index] = agent
+}
 
 func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	// Your code here.
+	term, isLeader := kv.rf.GetState()
+	if !isLeader {
+		reply.Err = ErrWrongLeader
+		return
+	}
+
+	// reject stale request
+	if !kv.testClerkSeqID(args.ClerkID, args.SeqID) {
+		reply.Err = ErrStaleRequest
+		return
+	}
+	DPrintf("kv %d handling get command %+v", kv.me, *args)
+
+	cmd := Op{
+		ClerkID: args.ClerkID,
+		SeqID:   args.SeqID,
+		OpCode:  OpGet,
+		Key:     args.Key,
+		Term:    term,
+	}
+
+	// 1. start a raft consencus
+	resultCh := make(chan OpResult, 1)
+	kv.mu.Lock()
+	index, _, isLeader := kv.rf.Start(cmd) // TODO is this work if Start() return different term
+	if !isLeader {
+		reply.Err = ErrWrongLeader
+		kv.mu.Unlock()
+		return
+	}
+
+	// 2. wait for the result on the result channel
+	opAgent := OpAgent{
+		cmd:      cmd,
+		resultCh: resultCh,
+	}
+
+	kv.prepareWaitingForResult(&opAgent, index)
+	kv.mu.Unlock()
+	// for !kv.killed() {
+	select {
+	case result := <-resultCh:
+		reply.Err = result.Err
+		reply.Value = result.Value
+		DPrintf("kv %d req %+v got reply %+v", kv.me, args, reply)
+	case <-time.After(1024 * time.Millisecond):
+		reply.Err = ErrResultTimeout
+		DPrintf("kv %d timeout waiting Get() at index %d for clerk %d", kv.me, index, args.ClerkID)
+	}
+	// }
 }
 
 func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	// Your code here.
+	// reject stale request
+	term, isLeader := kv.rf.GetState()
+	if !isLeader {
+		reply.Err = ErrWrongLeader
+		return
+	}
+
+	DPrintf("kv %d handling PutAppend(%+v)", kv.me, *args)
+	// DPrintf("kv %d handling put command %+v", kv.me, *args)
+	if !kv.testClerkSeqID(args.ClerkID, args.SeqID) {
+		reply.Err = ErrStaleRequest
+		DPrintf("kv %d stale request %+v", kv.me, *args)
+		return
+	}
+
+	cmd := Op{
+		ClerkID: args.ClerkID,
+		SeqID:   args.SeqID,
+		OpCode:  args.Op,
+		Key:     args.Key,
+		Value:   args.Value,
+		Term:    term,
+	}
+
+	// 1. start a raft consencus
+	resultCh := make(chan OpResult, 1)
+	kv.mu.Lock()
+	index, xterm, ok := kv.rf.Start(cmd)
+	DPrintf("kv %d, starting concensus index %d, term %d, isLeader %t, cmd %+v", kv.me, index, xterm, ok, cmd)
+	if !ok {
+		reply.Err = ErrWrongLeader
+		DPrintf("kv %d not leader, return", kv.me)
+		kv.mu.Unlock()
+		return
+	}
+
+	// 2. wait for the result on the result channel
+	opAgent := OpAgent{
+		cmd:      cmd,
+		resultCh: resultCh,
+	}
+
+	kv.prepareWaitingForResult(&opAgent, index)
+	kv.mu.Unlock()
+
+	// for !kv.killed() {
+	select {
+	case result := <-resultCh:
+		reply.Err = result.Err
+		DPrintf("kv %d req %+v sending reply %+v", kv.me, args, reply)
+		return
+	case <-time.After(1024 * time.Millisecond):
+		// ignore
+		reply.Err = ErrResultTimeout
+		DPrintf("kv %d timeout waiting PutAppend() at index %d for clerk %d", kv.me, index, args.ClerkID)
+	}
+	// }
 }
 
 //
@@ -65,6 +254,117 @@ func (kv *KVServer) Kill() {
 func (kv *KVServer) killed() bool {
 	z := atomic.LoadInt32(&kv.dead)
 	return z == 1
+}
+
+func (kv *KVServer) doExecCmd(msg *raft.ApplyMsg) {
+	DPrintf("kv %d handling command %+v", kv.me, *msg)
+	cmd, ok := msg.Command.(Op)
+	if !ok {
+		DPrintf("kv %d illegal msg %+v, cmd: %+v", kv.me, msg, reflect.TypeOf(msg.Command))
+		return
+	}
+
+	logIndex := msg.CommandIndex
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+	// handle stale or duplicated request
+	if !kv.tryUpdateClerkSeqID(cmd.ClerkID, cmd.SeqID) {
+		agent, ok := kv.resultMap[logIndex]
+		if !ok {
+			DPrintf("kv %d, find no agent for msg %+v", kv.me, msg)
+			return
+		}
+
+		// check term match
+		result := OpResult{
+			Err: ErrLeaderChange,
+		}
+
+		delete(kv.resultMap, logIndex)
+		DPrintf("found stale request of clerk %d cmd at index %d term", cmd.ClerkID, logIndex)
+
+		go func() {
+			select {
+			case agent.resultCh <- result:
+			case <-time.After(1 * time.Second): // FIXME magic number
+			}
+		}()
+		// if agent.cmd.Term <= cmd.Term {
+		// } else {
+		// 	// agent.cmd.Term might be greater of smaller than cmd.Term
+		// 	DPrintf("clerk %d cmd at index %d term %d mismatch with agent term %d, it's a stale request", cmd.ClerkID, logIndex, cmd.Term, agent.cmd.Term)
+		// }
+
+		return
+	}
+
+	result := OpResult{
+		Err: OK,
+	}
+	switch cmd.OpCode {
+	case OpGet:
+		// we don't care about stale request of Get()
+		result.Value, ok = kv.store[cmd.Key]
+		DPrintf("kv %d resulting get of key %s is %s, exist %t", kv.me, cmd.Key, result.Value, ok)
+		if !ok {
+			result.Err = ErrNoKey
+		}
+	case OpAppend:
+		tmp := kv.store[cmd.Key]
+		tmp += cmd.Value
+		kv.store[cmd.Key] = tmp
+		DPrintf("kv %d resulting append of key %s is %s", kv.me, cmd.Key, tmp)
+	case OpPut:
+		kv.store[cmd.Key] = cmd.Value
+		DPrintf("kv %d resulting put of key %s is %s", kv.me, cmd.Key, cmd.Value)
+	default:
+		result.Err = ErrUnknownOp
+	}
+
+	// notify result
+	agent, ok := kv.resultMap[logIndex]
+	if !ok {
+		DPrintf("kv %d found not agent for msg %+v, return now", kv.me, *msg)
+		return
+	}
+
+	// 1. term match
+	// 2. agent.cmd.Term > cmd.Term
+	// 3. agent.cmd.Term < cmd.Term
+	// both 2, 3 might happend
+	if agent.cmd.Term != cmd.Term {
+		DPrintf("kv %d found mismatch term at index %d", kv.me, logIndex)
+		result.Err = ErrLeaderChange
+		result.Value = ""
+	}
+	delete(kv.resultMap, logIndex)
+
+	// send back result
+	go func() {
+		select {
+		case agent.resultCh <- result:
+		case <-time.After(5 * time.Second): // TODO magic number
+		}
+	}()
+}
+
+func (kv *KVServer) handleSnapshot(msg *raft.ApplyMsg) {
+	// TODO
+	panic("no implemented")
+}
+
+func (kv *KVServer) execCmd() {
+	DPrintf("kv %d command executor running...", kv.me)
+	for msg := range kv.applyCh {
+		if msg.CommandValid {
+			kv.doExecCmd(&msg)
+		} else if msg.SnapshotValid {
+			kv.handleSnapshot(&msg)
+		} else {
+			panic(fmt.Sprintf("unknonw command type: %+v", msg))
+			// kv.handleSnapshot(&msg)
+		}
+	}
 }
 
 //
@@ -92,8 +392,13 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 
 	// You may need initialization code here.
 
+	kv.clerks = make(map[ClerkID]*ClerkInfo)
+	kv.store = make(map[string]string)
+	kv.resultMap = make(map[int]*OpAgent)
 	kv.applyCh = make(chan raft.ApplyMsg)
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
+	go kv.execCmd()
+	DPrintf("kv %d running", me)
 
 	// You may need initialization code here.
 
