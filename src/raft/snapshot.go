@@ -25,6 +25,7 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 
 	if rf.killed() {
 		DPrintf("server %d killed at term %d, return from install snapshot", rf.me, rf.currentTerm)
+		return
 	}
 
 	reply.Term = rf.currentTerm
@@ -75,6 +76,7 @@ func (rf *Raft) CondInstallSnapshot(lastIncludedTerm int, lastIncludedIndex int,
 	term := rf.log[0].Term
 	index := rf.log[0].Index
 	if lastIncludedTerm < term || (lastIncludedTerm == term && lastIncludedIndex <= index) {
+		DPrintf("server %d failed install snapshot, lastIncludedTerm %d, lastIncludedIndex %d, term %d, index %d", rf.me, lastIncludedTerm, lastIncludedIndex, term, index)
 		return false
 	}
 
