@@ -319,10 +319,8 @@ func (kv *KVServer) doExecCmd(msg *raft.ApplyMsg) {
 			result.Err = ErrNoKey
 		}
 	case OpAppend:
-		tmp := kv.store[cmd.Key]
-		tmp += cmd.Value
-		kv.store[cmd.Key] = tmp
-		DPrintf("kv %d resulting append of key %s and value %s is %s", kv.me, cmd.Key, cmd.Value, tmp)
+		kv.store[cmd.Key] += cmd.Value
+		DPrintf("kv %d resulting append of key %s and value %s is %s", kv.me, cmd.Key, cmd.Value, kv.store[cmd.Key])
 	case OpPut:
 		kv.store[cmd.Key] = cmd.Value
 		DPrintf("kv %d resulting put of key %s is %s", kv.me, cmd.Key, cmd.Value)
@@ -419,6 +417,7 @@ func (kv *KVServer) takeSnapshot() {
 	}
 }
 
+// assume kv.mu lock hold
 func (kv *KVServer) readPersist(data []byte) {
 	if kv == nil || len(data) < 1 {
 		return
