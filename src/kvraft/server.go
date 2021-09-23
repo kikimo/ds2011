@@ -322,7 +322,7 @@ func (kv *KVServer) doExecCmd(msg *raft.ApplyMsg) {
 		tmp := kv.store[cmd.Key]
 		tmp += cmd.Value
 		kv.store[cmd.Key] = tmp
-		DPrintf("kv %d resulting append of key %s is %s", kv.me, cmd.Key, tmp)
+		DPrintf("kv %d resulting append of key %s and value %s is %s", kv.me, cmd.Key, cmd.Value, tmp)
 	case OpPut:
 		kv.store[cmd.Key] = cmd.Value
 		DPrintf("kv %d resulting put of key %s is %s", kv.me, cmd.Key, cmd.Value)
