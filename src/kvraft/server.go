@@ -364,7 +364,7 @@ func (kv *KVServer) handleSnapshot(msg *raft.ApplyMsg) {
 		return
 	}
 
-	kv.readPersist(msg.Snapshot)
+	kv.loadSnapshot(msg.Snapshot)
 }
 
 func (kv *KVServer) execCmd() {
@@ -418,7 +418,7 @@ func (kv *KVServer) takeSnapshot() {
 }
 
 // assume kv.mu lock hold
-func (kv *KVServer) readPersist(data []byte) {
+func (kv *KVServer) loadSnapshot(data []byte) {
 	if kv == nil || len(data) < 1 {
 		return
 	}
@@ -468,7 +468,7 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 
 	kv.persister = persister
 	if persister.SnapshotSize() > 0 {
-		kv.readPersist(persister.ReadSnapshot())
+		kv.loadSnapshot(persister.ReadSnapshot())
 	}
 	if kv.clerks == nil {
 		kv.clerks = make(map[ClerkID]*ClerkInfo)
