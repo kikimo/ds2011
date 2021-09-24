@@ -75,8 +75,12 @@ func (rf *Raft) CondInstallSnapshot(lastIncludedTerm int, lastIncludedIndex int,
 
 	term := rf.log[0].Term
 	index := rf.log[0].Index
-	if lastIncludedTerm < term || (lastIncludedTerm == term && lastIncludedIndex <= index) {
-		DPrintf("server %d failed install snapshot, lastIncludedTerm %d, lastIncludedIndex %d, term %d, index %d", rf.me, lastIncludedTerm, lastIncludedIndex, term, index)
+	if lastIncludedTerm < term ||
+		// TODO unit test me, very important, god damn important,
+		// install a snapshot with lastIncludeIndex < rf.lastApplied is disastrous
+		(lastIncludedIndex < rf.lastApplied) ||
+		(lastIncludedTerm == term && lastIncludedIndex <= index) {
+		DPrintf("server %d failed install snapshot, lastIncludedTerm %d, lastIncludedIndex %d, term %d, index %d, lastApplied %d", rf.me, lastIncludedTerm, lastIncludedIndex, term, index, rf.lastApplied)
 		return false
 	}
 
