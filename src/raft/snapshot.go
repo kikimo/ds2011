@@ -151,13 +151,14 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 
 	offset := rf.log[0].Index
 	pos := index - offset
+	logSize := offset + len(rf.log)
 	if pos < 0 {
-		DPrintf("server %d underflow taking snapshot at %d at term %d", rf.me, index, rf.currentTerm)
+		DPrintf("server %d underflow taking snapshot at %d at term %d, curr log offset %d and size %d", rf.me, index, rf.currentTerm, offset, logSize)
 		return
 	}
 
 	if pos >= len(rf.log) {
-		DPrintf("server %d overflow taking snapshot at %d at term %d", rf.me, index, rf.currentTerm)
+		DPrintf("server %d overflow taking snapshot at %d at term %d, curr log offset %d and size %d", rf.me, index, rf.currentTerm, offset, logSize)
 		return
 	}
 

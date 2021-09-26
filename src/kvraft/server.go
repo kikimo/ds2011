@@ -14,7 +14,7 @@ import (
 	"6.824/raft"
 )
 
-const Debug = false
+const Debug = true
 
 func DPrintf(format string, a ...interface{}) (n int, err error) {
 	if Debug {
@@ -170,7 +170,7 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 		reply.Err = result.Err
 		reply.Value = result.Value
 		DPrintf("kv %d req %+v got reply %+v", kv.me, args, reply)
-	case <-time.After(1024 * time.Millisecond):
+	case <-time.After(128 * time.Millisecond):
 		reply.Err = ErrResultTimeout
 		DPrintf("kv %d timeout waiting Get() at index %d for clerk %d", kv.me, index, args.ClerkID)
 	}
@@ -230,7 +230,7 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 		reply.Err = result.Err
 		DPrintf("kv %d req %+v sending reply %+v", kv.me, args, reply)
 		return
-	case <-time.After(1024 * time.Millisecond):
+	case <-time.After(128 * time.Millisecond):
 		// ignore
 		reply.Err = ErrResultTimeout
 		DPrintf("kv %d timeout waiting PutAppend() at index %d for clerk %d", kv.me, index, args.ClerkID)
@@ -370,6 +370,7 @@ func (kv *KVServer) handleSnapshot(msg *raft.ApplyMsg) {
 func (kv *KVServer) execCmd() {
 	DPrintf("kv %d command executor running...", kv.me)
 	for msg := range kv.applyCh {
+		kv.tryTakeSnapshot()
 		if msg.CommandValid {
 			kv.doExecCmd(&msg)
 		} else if msg.SnapshotValid {
@@ -381,7 +382,11 @@ func (kv *KVServer) execCmd() {
 	DPrintf("kv %d command executor stoped...", kv.me)
 }
 
-func (kv *KVServer) doTakeSnapshot() {
+func (kv *KVServer) tryTakeSnapshot() {
+	if kv.persister.RaftStateSize() <= kv.maxraftstate-128 {
+		return
+	}
+
 	kv.mu.Lock()
 	defer kv.mu.Unlock()
 
@@ -403,19 +408,19 @@ func (kv *KVServer) doTakeSnapshot() {
 	kv.rf.Snapshot(lastApplied, data)
 }
 
-func (kv *KVServer) takeSnapshot() {
-	if kv.maxraftstate == -1 {
-		return
-	}
+// func (kv *KVServer) takeSnapshot() {
+// 	if kv.maxraftstate == -1 {
+// 		return
+// 	}
 
-	for !kv.killed() {
-		if kv.persister.RaftStateSize() >= kv.maxraftstate-128 {
-			kv.doTakeSnapshot()
-		}
+// 	for !kv.killed() {
+// 		if kv.persister.RaftStateSize() >= kv.maxraftstate-128 {
+// 			kv.doTakeSnapshot()
+// 		}
 
-		time.Sleep(16 * time.Millisecond) // TODO magic number
-	}
-}
+// 		time.Sleep(16 * time.Millisecond) // TODO magic number
+// 	}
+// }
 
 // assume kv.mu lock hold
 func (kv *KVServer) loadSnapshot(data []byte) {
@@ -480,9 +485,9 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.resultMap = make(map[int]*OpAgent)
 	kv.applyCh = make(chan raft.ApplyMsg)
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
-	if maxraftstate != -1 {
-		go kv.takeSnapshot()
-	}
+	// if maxraftstate != -1 {
+	// 	go kv.takeSnapshot()
+	// }
 	go kv.execCmd()
 	DPrintf("kv %d running", me)
 

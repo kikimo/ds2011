@@ -110,7 +110,7 @@ type Raft struct {
 	rvChan        chan rvParams
 	appendLogChan chan struct{}
 	applyCh       chan ApplyMsg
-	lastHB        time.Time
+	lastHB        int64
 	rpcManager    RaftRPCManager
 
 	commitIndex int
@@ -123,7 +123,6 @@ type Raft struct {
 // return currentTerm and whether this server
 // believes it is the leader.
 func (rf *Raft) GetState() (int, bool) {
-
 	var term int
 	var isleader bool
 	// Your code here (2A).
@@ -617,13 +616,14 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	rf.mu.Unlock()
 
 	go func() {
-		time.Sleep(8 * time.Millisecond)
+		time.Sleep(1 * time.Millisecond)
 		rf.mu.Lock()
-		latestHb := rf.lastHB
+		latestHB := rf.lastHB
 		rf.mu.Unlock()
-
+		// latestHb := atomic.LoadInt64(&rf.lastHB)
 		// we've got sent
-		if lastHB != latestHb {
+		if lastHB != latestHB {
+			// fmt.Printf("commited, ignore\n")
 			return
 		}
 
@@ -701,7 +701,8 @@ func (rf *Raft) ticker() {
 			to := LeaderIdlePeriod
 			argsList := rf.getHBEntries()
 			rf.tryApplyLog()
-			rf.lastHB = time.Now()
+			// rf.lastHB = time.Now()
+			rf.lastHB = time.Now().UnixNano()
 			rf.mu.Unlock()
 			sendHBChan := make(chan hbParams, 1)
 			go rf.sendHeartbeat(term, sendHBChan, argsList, false)
@@ -901,7 +902,7 @@ WAIT:
 			argList := rf.getHBEntries()
 			// TODO consider commit empty log if commitLogIndex lag behind lastLogIndex
 			// send empty heartbeat right away
-			rf.lastHB = time.Now()
+			rf.lastHB = time.Now().UnixNano()
 			rf.mu.Unlock()
 			sendHBChan := make(chan hbParams, 1)
 			rf.sendHeartbeat(term, sendHBChan, argList, false)
