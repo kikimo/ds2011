@@ -85,6 +85,16 @@ type LogEntry struct {
 	Command interface{}
 }
 
+type AppendResult struct {
+	isLeader bool
+	index    int
+	term     int
+}
+type LogEntryWrapper struct {
+	command interface{}
+	retCh   chan AppendResult
+}
+
 //
 // A Go object implementing a single Raft peer.
 //
@@ -101,6 +111,7 @@ type Raft struct {
 	currentTerm int
 	votedFor    int
 	log         []*LogEntry
+	logBuf      *BlockQueue
 
 	snapshot []byte
 
@@ -593,7 +604,80 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 // term. the third return value is true if this server believes it is
 // the leader.
 //
+//
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
+	// fmt.Printf("server %d starting %+v", rf.me, command)
+	rch := make(chan AppendResult, 1)
+	bufEnt := LogEntryWrapper{
+		command: command,
+		retCh:   rch,
+	}
+	rf.logBuf.Append(bufEnt)
+	ret := <-bufEnt.retCh
+	return ret.index, ret.term, ret.isLeader
+}
+
+func (rf *Raft) runLogAppender() {
+	// fmt.Printf("server %d appender running\n", rf.me)
+	for !rf.killed() {
+		// fmt.Printf("server %d taking...\n", rf.me)
+		cmds := rf.logBuf.TakeAll()
+		// fmt.Printf("server %d taked...\n", rf.me)
+		// fmt.Printf("server %d taked...\n", rf.me)
+		if len(cmds) <= 0 {
+			// fmt.Printf("empty log\n")
+			continue
+		}
+		// fmt.Printf("server %d appender taking log %d\n", rf.me, len(cmds))
+		// fmt.Printf("server %d appender taking log %d\n", rf.me, len(cmds))
+		// fmt.Printf("server %d appending log %d at %d\n", rf.me, len(cmds), time.Now().UnixNano())
+
+		// fmt.Printf("locking\n")
+		rf.mu.Lock()
+		// fmt.Printf("locked\n")
+		index := rf.log[0].Index + len(rf.log)
+		// fmt.Printf("logs: %+v, sz: %d, index: %d\n", rf.log, len(rf.log), rf.log[0].Index)
+		isLeader := rf.role == RoleLeader
+		for i := range cmds {
+			e := cmds[i].(LogEntryWrapper)
+			ret := AppendResult{
+				isLeader: isLeader,
+			}
+
+			if isLeader {
+				ret.index = index
+				index++
+				ret.term = rf.currentTerm
+				ent := &LogEntry{
+					Term:    ret.term,
+					Index:   ret.index,
+					Command: e.command,
+				}
+				rf.log = append(rf.log, ent)
+			}
+			e.retCh <- ret
+		}
+
+		// fmt.Printf("sending hb\n")
+		if isLeader && len(cmds) > 0 {
+			rf.persist(false)
+			rf.nextIndex[rf.me] = index
+			rf.matchIndex[rf.me] = index - 1
+
+			go func() {
+				select {
+				case rf.appendLogChan <- struct{}{}:
+				case <-time.After(64 * time.Millisecond): // FIXME magic number
+				}
+			}()
+		}
+
+		// fmt.Printf("unlocked\n")
+		rf.mu.Unlock()
+	}
+}
+
+func (rf *Raft) _Start(command interface{}) (int, int, bool) {
 	// Your code here (2B).
 	rf.mu.Lock()
 	isLeader := rf.role == RoleLeader
@@ -1276,11 +1360,13 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.applyCh = applyCh
 	rf.lastApplied = rf.log[0].Index
 	rf.commitIndex = rf.log[0].Index
+	rf.logBuf = newQueue()
 	rf.nextIndex = make([]int, len(rf.peers))
 	rf.matchIndex = make([]int, len(rf.peers))
 	rf.rpcManager = &defaultRaftRPCManager{rf}
 
 	// start ticker goroutine to start elections
+	go rf.runLogAppender()
 	go rf.ticker()
 
 	return rf
