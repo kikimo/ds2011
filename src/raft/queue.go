@@ -1,21 +1,31 @@
 package raft
 
 import (
-	"fmt"
 	"sync"
 	"sync/atomic"
 	"time"
 )
 
+const (
+	QueueOpen   = 0
+	QueueClosed = 1
+)
+
 type BlockQueue struct {
-	mu     sync.Mutex
-	cond   *sync.Cond
-	que    []interface{}
-	closed int32
+	mu           sync.Mutex
+	cond         *sync.Cond
+	que          []interface{}
+	closed       int32
+	closeHandler CloseHandler
 }
 
-func (q *BlockQueue) Append(e interface{}) {
+func (q *BlockQueue) Append(e interface{}) bool {
 	q.mu.Lock()
+	if atomic.LoadInt32(&q.closed) == QueueClosed {
+		q.mu.Unlock()
+		return false
+	}
+
 	q.que = append(q.que, e)
 	sz := len(q.que)
 	q.mu.Unlock()
@@ -26,7 +36,11 @@ func (q *BlockQueue) Append(e interface{}) {
 		}
 		q.cond.Broadcast()
 	}()
+
+	return true
 }
+
+type CloseHandler func(o interface{})
 
 func (q *BlockQueue) Closed() bool {
 	return atomic.LoadInt32(&q.closed) == 1
@@ -49,17 +63,26 @@ func (q *BlockQueue) TakeAll() []interface{} {
 }
 
 func (q *BlockQueue) Close() {
-	fmt.Printf("queue closing...\n")
+	DPrintf("queue closing...\n")
 	q.mu.Lock()
-	atomic.StoreInt32(&q.closed, 1)
+	atomic.StoreInt32(&q.closed, QueueClosed)
+	// invoke callback
+	if q.closeHandler != nil {
+		for i := range q.que {
+			o := q.que[i]
+			q.closeHandler(o)
+		}
+	}
+	q.que = nil
 	q.mu.Unlock()
 	q.cond.Broadcast()
-	fmt.Printf("queueu closed!\n")
+	DPrintf("queueu closed!\n")
 }
 
-func newQueue() *BlockQueue {
+func newQueue(h CloseHandler) *BlockQueue {
 	que := &BlockQueue{
-		closed: 0,
+		closed:       QueueOpen,
+		closeHandler: h,
 	}
 	que.cond = sync.NewCond(&que.mu)
 

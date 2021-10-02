@@ -612,9 +612,26 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		command: command,
 		retCh:   rch,
 	}
-	rf.logBuf.Append(bufEnt)
+	if !rf.logBuf.Append(bufEnt) {
+		DPrintf("server %d append queue closed, return", rf.me)
+		return -1, -1, false
+	}
+
+	DPrintf("server %d waiting command %+v to be appended", rf.me, command)
 	ret := <-bufEnt.retCh
+	DPrintf("server %d waiting command %+v appended finished", rf.me, command)
 	return ret.index, ret.term, ret.isLeader
+}
+
+func (rf *Raft) appendQueueCallback(o interface{}) {
+	DPrintf("server %d handling closed queue command %+v\n", rf.me, o)
+	cmd := o.(LogEntryWrapper)
+	cmd.retCh <- AppendResult{
+		isLeader: false,
+		index:    -1,
+		term:     -1,
+	}
+	DPrintf("server %d done handling closed queue command %+v\n", rf.me, o)
 }
 
 func (rf *Raft) runLogAppender() {
@@ -740,6 +757,7 @@ func (rf *Raft) Kill() {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	close(rf.applyCh)
+	rf.logBuf.Close()
 }
 
 func (rf *Raft) killed() bool {
@@ -1360,7 +1378,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.applyCh = applyCh
 	rf.lastApplied = rf.log[0].Index
 	rf.commitIndex = rf.log[0].Index
-	rf.logBuf = newQueue()
+	rf.logBuf = newQueue(rf.appendQueueCallback)
 	rf.nextIndex = make([]int, len(rf.peers))
 	rf.matchIndex = make([]int, len(rf.peers))
 	rf.rpcManager = &defaultRaftRPCManager{rf}

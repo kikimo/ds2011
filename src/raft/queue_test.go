@@ -8,7 +8,7 @@ import (
 )
 
 func TestQueue(t *testing.T) {
-	que := newQueue()
+	que := newQueue(nil)
 
 	clients := 4
 	var wg sync.WaitGroup
