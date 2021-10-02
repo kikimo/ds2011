@@ -1254,7 +1254,8 @@ func (rf *Raft) tryApplyLog() {
 			select {
 			case rf.applyCh <- msg:
 				rf.lastApplied++
-			case <-time.After(LeaderIdlePeriod):
+			// case <-time.After(LeaderIdlePeriod):
+			case <-time.After(4 * time.Millisecond):
 				// TODO commit msg if lastApplied < rf.commitIndex
 				DPrintf("leader %d timeout commiting msg %d at term %d", rf.me, rf.lastApplied, rf.currentTerm)
 				return
