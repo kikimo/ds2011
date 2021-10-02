@@ -605,7 +605,7 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 // the leader.
 //
 //
-func (rf *Raft) _Start(command interface{}) (int, int, bool) {
+func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	// fmt.Printf("server %d starting %+v", rf.me, command)
 	rch := make(chan AppendResult, 1)
 	bufEnt := LogEntryWrapper{
@@ -694,7 +694,7 @@ func (rf *Raft) runLogAppender() {
 	}
 }
 
-func (rf *Raft) Start(command interface{}) (int, int, bool) {
+func (rf *Raft) _Start(command interface{}) (int, int, bool) {
 	// Your code here (2B).
 	rf.mu.Lock()
 	isLeader := rf.role == RoleLeader
