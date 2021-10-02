@@ -605,7 +605,7 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 // the leader.
 //
 //
-func (rf *Raft) Start(command interface{}) (int, int, bool) {
+func (rf *Raft) _Start(command interface{}) (int, int, bool) {
 	// fmt.Printf("server %d starting %+v", rf.me, command)
 	rch := make(chan AppendResult, 1)
 	bufEnt := LogEntryWrapper{
@@ -694,7 +694,7 @@ func (rf *Raft) runLogAppender() {
 	}
 }
 
-func (rf *Raft) _Start(command interface{}) (int, int, bool) {
+func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	// Your code here (2B).
 	rf.mu.Lock()
 	isLeader := rf.role == RoleLeader
@@ -718,7 +718,7 @@ func (rf *Raft) _Start(command interface{}) (int, int, bool) {
 	rf.mu.Unlock()
 
 	go func() {
-		time.Sleep(8 * time.Millisecond)
+		time.Sleep(1 * time.Millisecond)
 		rf.mu.Lock()
 		latestHb := rf.lastHB
 		rf.mu.Unlock()
