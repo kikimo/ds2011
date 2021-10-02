@@ -50,6 +50,11 @@ type OpResult struct {
 	Value string
 }
 
+const (
+	LastAppliedUnchange = 0
+	LastAppliedChanged  = 1
+)
+
 type KVServer struct {
 	mu      sync.Mutex
 	me      int
@@ -61,10 +66,11 @@ type KVServer struct {
 	persister    *raft.Persister
 
 	// Your definitions here.
-	clerks      map[ClerkID]*ClerkInfo
-	store       map[string]string
-	lastApplied int
-	resultMap   map[int]*OpAgent
+	clerks               map[ClerkID]*ClerkInfo
+	store                map[string]string
+	lastApplied          int
+	isLastAppliedChanged int32
+	resultMap            map[int]*OpAgent
 }
 
 func (kv *KVServer) testClerkSeqID(clerkID ClerkID, seqID SeqID) bool {
@@ -275,6 +281,7 @@ func (kv *KVServer) doExecCmd(msg *raft.ApplyMsg) {
 		return
 	}
 	kv.lastApplied = msg.CommandIndex
+	atomic.StoreInt32(&kv.isLastAppliedChanged, LastAppliedChanged)
 
 	// handle stale or duplicated request
 	if !kv.tryUpdateClerkSeqID(cmd.ClerkID, cmd.SeqID) {
@@ -386,6 +393,7 @@ func (kv *KVServer) doTakeSnapshot() {
 	defer kv.mu.Unlock()
 
 	lastApplied := kv.lastApplied
+	atomic.StoreInt32(&kv.isLastAppliedChanged, LastAppliedUnchange)
 	w := new(bytes.Buffer)
 	e := labgob.NewEncoder(w)
 	if err := e.Encode(&kv.clerks); err != nil {
@@ -409,7 +417,9 @@ func (kv *KVServer) takeSnapshot() {
 	}
 
 	for !kv.killed() {
-		if kv.persister.RaftStateSize() >= kv.maxraftstate-128 {
+		changed := atomic.LoadInt32(&kv.isLastAppliedChanged)
+		DPrintf("kv %d last applied changed %d, raft state size %d, maxraftstate %d", kv.me, changed, kv.persister.RaftStateSize(), kv.maxraftstate)
+		if kv.persister.RaftStateSize() >= kv.maxraftstate-128 && changed == LastAppliedChanged {
 			kv.doTakeSnapshot()
 		}
 
@@ -479,6 +489,7 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 
 	kv.resultMap = make(map[int]*OpAgent)
 	kv.applyCh = make(chan raft.ApplyMsg)
+	kv.isLastAppliedChanged = LastAppliedUnchange
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
 	if maxraftstate != -1 {
 		go kv.takeSnapshot()
