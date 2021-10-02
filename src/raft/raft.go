@@ -1254,6 +1254,11 @@ func (rf *Raft) tryApplyLog() {
 			select {
 			case rf.applyCh <- msg:
 				rf.lastApplied++
+
+			// TODO unit test me, hold global lock and too long will block
+			// other goroutines and lead to disastrous result, for example
+			// that might starve an rf.Start() operation and that might in
+			// turn stuck kvserver's command execution.
 			// case <-time.After(LeaderIdlePeriod):
 			case <-time.After(4 * time.Millisecond):
 				// TODO commit msg if lastApplied < rf.commitIndex
