@@ -213,7 +213,7 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	resultCh := make(chan OpResult, 1)
 	kv.mu.Lock()
 	index, xterm, ok := kv.rf.Start(cmd)
-	DPrintf("kv %d, starting concensus index %d, term %d, isLeader %t, cmd %+v", kv.me, index, xterm, ok, cmd)
+	DPrintf("kv %d, starting consencus index %d, term %d, isLeader %t, cmd %+v", kv.me, index, xterm, ok, cmd)
 	if !ok {
 		reply.Err = ErrWrongLeader
 		DPrintf("kv %d not leader, return", kv.me)
