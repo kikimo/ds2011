@@ -1,6 +1,7 @@
 package kvraft
 
 import (
+	"bytes"
 	"fmt"
 	"log"
 	"reflect"
@@ -35,8 +36,8 @@ type Op struct {
 }
 
 type ClerkInfo struct {
-	clerkID ClerkID
-	seqID   SeqID
+	ClerkID ClerkID
+	SeqID   SeqID
 }
 
 type OpAgent struct {
@@ -49,6 +50,11 @@ type OpResult struct {
 	Value string
 }
 
+const (
+	LastAppliedUnchange = 0
+	LastAppliedChanged  = 1
+)
+
 type KVServer struct {
 	mu      sync.Mutex
 	me      int
@@ -57,11 +63,14 @@ type KVServer struct {
 	dead    int32 // set by Kill()
 
 	maxraftstate int // snapshot if log grows this big
+	persister    *raft.Persister
 
 	// Your definitions here.
-	clerks    map[ClerkID]*ClerkInfo
-	store     map[string]string
-	resultMap map[int]*OpAgent
+	clerks               map[ClerkID]*ClerkInfo
+	store                map[string]string
+	lastApplied          int
+	isLastAppliedChanged int32
+	resultMap            map[int]*OpAgent
 }
 
 func (kv *KVServer) testClerkSeqID(clerkID ClerkID, seqID SeqID) bool {
@@ -73,30 +82,30 @@ func (kv *KVServer) testClerkSeqID(clerkID ClerkID, seqID SeqID) bool {
 	}
 
 	clerk := kv.clerks[clerkID]
-	return clerk.seqID < seqID
+	return clerk.SeqID < seqID
 }
 
 // assume kv.mu lock hold
 func (kv *KVServer) tryUpdateClerkSeqID(clerkID ClerkID, seqID SeqID) bool {
 	if _, ok := kv.clerks[clerkID]; !ok {
 		kv.clerks[clerkID] = &ClerkInfo{
-			clerkID: clerkID,
-			seqID:   0,
+			ClerkID: clerkID,
+			SeqID:   0,
 		}
 	}
 
 	clerk := kv.clerks[clerkID]
-	if clerk.seqID == seqID {
+	if clerk.SeqID == seqID {
 		DPrintf("duplicated request of clerk %d with seqID %d found", clerkID, seqID)
 		return false
 	}
 
-	if clerk.seqID > seqID {
+	if clerk.SeqID > seqID {
 		DPrintf("stale request of clerk %d with seqID %d found", clerkID, seqID)
 		return false
 	}
 
-	clerk.seqID = seqID
+	clerk.SeqID = seqID
 	return true
 }
 
@@ -204,7 +213,7 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	resultCh := make(chan OpResult, 1)
 	kv.mu.Lock()
 	index, xterm, ok := kv.rf.Start(cmd)
-	DPrintf("kv %d, starting concensus index %d, term %d, isLeader %t, cmd %+v", kv.me, index, xterm, ok, cmd)
+	DPrintf("kv %d, starting consencus index %d, term %d, isLeader %t, cmd %+v", kv.me, index, xterm, ok, cmd)
 	if !ok {
 		reply.Err = ErrWrongLeader
 		DPrintf("kv %d not leader, return", kv.me)
@@ -267,6 +276,13 @@ func (kv *KVServer) doExecCmd(msg *raft.ApplyMsg) {
 	logIndex := msg.CommandIndex
 	kv.mu.Lock()
 	defer kv.mu.Unlock()
+	if msg.CommandIndex <= kv.lastApplied {
+		DPrintf("kv %d found duplicated command %+v", kv.me, *msg)
+		return
+	}
+	kv.lastApplied = msg.CommandIndex
+	atomic.StoreInt32(&kv.isLastAppliedChanged, LastAppliedChanged)
+
 	// handle stale or duplicated request
 	if !kv.tryUpdateClerkSeqID(cmd.ClerkID, cmd.SeqID) {
 		agent, ok := kv.resultMap[logIndex]
@@ -310,10 +326,8 @@ func (kv *KVServer) doExecCmd(msg *raft.ApplyMsg) {
 			result.Err = ErrNoKey
 		}
 	case OpAppend:
-		tmp := kv.store[cmd.Key]
-		tmp += cmd.Value
-		kv.store[cmd.Key] = tmp
-		DPrintf("kv %d resulting append of key %s is %s", kv.me, cmd.Key, tmp)
+		kv.store[cmd.Key] += cmd.Value
+		DPrintf("kv %d resulting append of key %s and value %s is %s", kv.me, cmd.Key, cmd.Value, kv.store[cmd.Key])
 	case OpPut:
 		kv.store[cmd.Key] = cmd.Value
 		DPrintf("kv %d resulting put of key %s is %s", kv.me, cmd.Key, cmd.Value)
@@ -349,8 +363,15 @@ func (kv *KVServer) doExecCmd(msg *raft.ApplyMsg) {
 }
 
 func (kv *KVServer) handleSnapshot(msg *raft.ApplyMsg) {
-	// TODO
-	panic("no implemented")
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+	DPrintf("kv %d handling snapshot: %+v", kv.me, *msg)
+	if !kv.rf.CondInstallSnapshot(msg.SnapshotTerm, msg.SnapshotIndex, msg.Snapshot) {
+		DPrintf("kv %d failed install snapshot", kv.me)
+		return
+	}
+
+	kv.loadSnapshot(msg.Snapshot)
 }
 
 func (kv *KVServer) execCmd() {
@@ -362,9 +383,71 @@ func (kv *KVServer) execCmd() {
 			kv.handleSnapshot(&msg)
 		} else {
 			panic(fmt.Sprintf("unknonw command type: %+v", msg))
-			// kv.handleSnapshot(&msg)
 		}
 	}
+	DPrintf("kv %d command executor stoped...", kv.me)
+}
+
+func (kv *KVServer) doTakeSnapshot() {
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+
+	lastApplied := kv.lastApplied
+	atomic.StoreInt32(&kv.isLastAppliedChanged, LastAppliedUnchange)
+	w := new(bytes.Buffer)
+	e := labgob.NewEncoder(w)
+	if err := e.Encode(&kv.clerks); err != nil {
+		panic(fmt.Sprintf("failed encoding clerks: %+v", err))
+	}
+
+	if err := e.Encode(&kv.store); err != nil {
+		panic(fmt.Sprintf("failed encoding store: %+v", err))
+	}
+
+	if err := e.Encode(&lastApplied); err != nil {
+		panic(fmt.Sprintf("failed encoding lastApplied: %+v", err))
+	}
+	data := w.Bytes()
+	kv.rf.Snapshot(lastApplied, data)
+}
+
+func (kv *KVServer) takeSnapshot() {
+	if kv.maxraftstate == -1 {
+		return
+	}
+
+	for !kv.killed() {
+		changed := atomic.LoadInt32(&kv.isLastAppliedChanged)
+		DPrintf("kv %d last applied changed %d, raft state size %d, maxraftstate %d", kv.me, changed, kv.persister.RaftStateSize(), kv.maxraftstate)
+		if kv.persister.RaftStateSize() >= kv.maxraftstate-128 && changed == LastAppliedChanged {
+			kv.doTakeSnapshot()
+		}
+
+		time.Sleep(16 * time.Millisecond) // TODO magic number
+	}
+}
+
+// assume kv.mu lock hold
+func (kv *KVServer) loadSnapshot(data []byte) {
+	if kv == nil || len(data) < 1 {
+		return
+	}
+
+	r := bytes.NewBuffer(data)
+	d := labgob.NewDecoder(r)
+	if err := d.Decode(&kv.clerks); err != nil {
+		panic(fmt.Sprintf("failed decoding kv clerk: %+v", err))
+	}
+
+	if err := d.Decode(&kv.store); err != nil {
+		panic(fmt.Sprintf("failed decoding kv store: %+v", err))
+	}
+
+	lastApplied := 0
+	if err := d.Decode(&lastApplied); err != nil {
+		panic(fmt.Sprintf("failed decoding kv lastAppliedIndex: %+v", err))
+	}
+	kv.lastApplied = lastApplied
 }
 
 //
@@ -389,14 +472,28 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv := new(KVServer)
 	kv.me = me
 	kv.maxraftstate = maxraftstate
+	DPrintf("kv %d maxraftstate %d", kv.me, maxraftstate)
 
 	// You may need initialization code here.
 
-	kv.clerks = make(map[ClerkID]*ClerkInfo)
-	kv.store = make(map[string]string)
+	kv.persister = persister
+	if persister.SnapshotSize() > 0 {
+		kv.loadSnapshot(persister.ReadSnapshot())
+	}
+	if kv.clerks == nil {
+		kv.clerks = make(map[ClerkID]*ClerkInfo)
+	}
+	if kv.store == nil {
+		kv.store = make(map[string]string)
+	}
+
 	kv.resultMap = make(map[int]*OpAgent)
 	kv.applyCh = make(chan raft.ApplyMsg)
+	kv.isLastAppliedChanged = LastAppliedUnchange
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
+	if maxraftstate != -1 {
+		go kv.takeSnapshot()
+	}
 	go kv.execCmd()
 	DPrintf("kv %d running", me)
 

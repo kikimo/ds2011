@@ -152,7 +152,7 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 			// TODO unit test me
 			// don't increase seqID for PutAppend(), that will result into
 			// duplicate result
-			args.SeqID = ck.seqID
+			// args.SeqID = ck.seqID
 			ck.updateLeader()
 		case ErrStaleRequest:
 			// this request has been executed

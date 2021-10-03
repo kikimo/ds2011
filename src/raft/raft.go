@@ -85,6 +85,16 @@ type LogEntry struct {
 	Command interface{}
 }
 
+type AppendResult struct {
+	isLeader bool
+	index    int
+	term     int
+}
+type LogEntryWrapper struct {
+	command interface{}
+	retCh   chan AppendResult
+}
+
 //
 // A Go object implementing a single Raft peer.
 //
@@ -101,6 +111,7 @@ type Raft struct {
 	currentTerm int
 	votedFor    int
 	log         []*LogEntry
+	logBuf      *BlockQueue
 
 	snapshot []byte
 
@@ -151,9 +162,17 @@ func (rf *Raft) persist(withSnapshot bool) {
 	// rf.persister.SaveRaftState(data)
 	w := new(bytes.Buffer)
 	e := labgob.NewEncoder(w)
-	e.Encode(rf.currentTerm)
-	e.Encode(rf.votedFor)
-	e.Encode(rf.log)
+	if err := e.Encode(rf.currentTerm); err != nil {
+		panic(fmt.Sprintf("failed encoding currentTerm: %+v", err))
+	}
+
+	if err := e.Encode(rf.votedFor); err != nil {
+		panic(fmt.Sprintf("failed encoding votedFor: %+v", err))
+	}
+
+	if err := e.Encode(rf.log); err != nil {
+		panic(fmt.Sprintf("failed encoding rf.log: %+v", err))
+	}
 	data := w.Bytes()
 
 	if !withSnapshot {
@@ -585,7 +604,97 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 // term. the third return value is true if this server believes it is
 // the leader.
 //
+//
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
+	// fmt.Printf("server %d starting %+v", rf.me, command)
+	rch := make(chan AppendResult, 1)
+	bufEnt := LogEntryWrapper{
+		command: command,
+		retCh:   rch,
+	}
+	if !rf.logBuf.Append(bufEnt) {
+		DPrintf("server %d append queue closed, return", rf.me)
+		return -1, -1, false
+	}
+
+	DPrintf("server %d waiting command %+v to be appended", rf.me, command)
+	ret := <-bufEnt.retCh
+	DPrintf("server %d waiting command %+v appended finished", rf.me, command)
+	return ret.index, ret.term, ret.isLeader
+}
+
+func (rf *Raft) appendQueueCallback(o interface{}) {
+	DPrintf("server %d handling closed queue command %+v\n", rf.me, o)
+	cmd := o.(LogEntryWrapper)
+	cmd.retCh <- AppendResult{
+		isLeader: false,
+		index:    -1,
+		term:     -1,
+	}
+	DPrintf("server %d done handling closed queue command %+v\n", rf.me, o)
+}
+
+func (rf *Raft) runLogAppender() {
+	// fmt.Printf("server %d appender running\n", rf.me)
+	for !rf.killed() {
+		// fmt.Printf("server %d taking...\n", rf.me)
+		cmds := rf.logBuf.TakeAll()
+		// fmt.Printf("server %d taked...\n", rf.me)
+		// fmt.Printf("server %d taked...\n", rf.me)
+		if len(cmds) <= 0 {
+			// fmt.Printf("empty log\n")
+			continue
+		}
+		// fmt.Printf("server %d appender taking log %d\n", rf.me, len(cmds))
+		// fmt.Printf("server %d appender taking log %d\n", rf.me, len(cmds))
+		// fmt.Printf("server %d appending log %d at %d\n", rf.me, len(cmds), time.Now().UnixNano())
+
+		// fmt.Printf("locking\n")
+		rf.mu.Lock()
+		// fmt.Printf("locked\n")
+		index := rf.log[0].Index + len(rf.log)
+		// fmt.Printf("logs: %+v, sz: %d, index: %d\n", rf.log, len(rf.log), rf.log[0].Index)
+		isLeader := rf.role == RoleLeader
+		for i := range cmds {
+			e := cmds[i].(LogEntryWrapper)
+			ret := AppendResult{
+				isLeader: isLeader,
+			}
+
+			if isLeader {
+				ret.index = index
+				index++
+				ret.term = rf.currentTerm
+				ent := &LogEntry{
+					Term:    ret.term,
+					Index:   ret.index,
+					Command: e.command,
+				}
+				rf.log = append(rf.log, ent)
+			}
+			e.retCh <- ret
+		}
+
+		// fmt.Printf("sending hb\n")
+		if isLeader && len(cmds) > 0 {
+			rf.persist(false)
+			rf.nextIndex[rf.me] = index
+			rf.matchIndex[rf.me] = index - 1
+
+			go func() {
+				select {
+				case rf.appendLogChan <- struct{}{}:
+				case <-time.After(64 * time.Millisecond): // FIXME magic number
+				}
+			}()
+		}
+
+		// fmt.Printf("unlocked\n")
+		rf.mu.Unlock()
+	}
+}
+
+func (rf *Raft) _Start(command interface{}) (int, int, bool) {
 	// Your code here (2B).
 	rf.mu.Lock()
 	isLeader := rf.role == RoleLeader
@@ -609,7 +718,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	rf.mu.Unlock()
 
 	go func() {
-		time.Sleep(8 * time.Millisecond)
+		time.Sleep(1 * time.Millisecond)
 		rf.mu.Lock()
 		latestHb := rf.lastHB
 		rf.mu.Unlock()
@@ -648,6 +757,7 @@ func (rf *Raft) Kill() {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	close(rf.applyCh)
+	rf.logBuf.Close()
 }
 
 func (rf *Raft) killed() bool {
@@ -1144,7 +1254,13 @@ func (rf *Raft) tryApplyLog() {
 			select {
 			case rf.applyCh <- msg:
 				rf.lastApplied++
-			case <-time.After(LeaderIdlePeriod):
+
+			// TODO unit test me, hold global lock and too long will block
+			// other goroutines and lead to disastrous result, for example
+			// that might starve an rf.Start() operation and that might in
+			// turn stuck kvserver's command execution.
+			// case <-time.After(LeaderIdlePeriod):
+			case <-time.After(4 * time.Millisecond):
 				// TODO commit msg if lastApplied < rf.commitIndex
 				DPrintf("leader %d timeout commiting msg %d at term %d", rf.me, rf.lastApplied, rf.currentTerm)
 				return
@@ -1268,11 +1384,13 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.applyCh = applyCh
 	rf.lastApplied = rf.log[0].Index
 	rf.commitIndex = rf.log[0].Index
+	rf.logBuf = newQueue(rf.appendQueueCallback)
 	rf.nextIndex = make([]int, len(rf.peers))
 	rf.matchIndex = make([]int, len(rf.peers))
 	rf.rpcManager = &defaultRaftRPCManager{rf}
 
 	// start ticker goroutine to start elections
+	go rf.runLogAppender()
 	go rf.ticker()
 
 	return rf
