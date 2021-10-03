@@ -413,9 +413,12 @@ func GenericTestSpeed(t *testing.T, part string, maxraftstate int) {
 
 	start := time.Now()
 	for i := 0; i < numOps; i++ {
+		DPrintf("the %dth iter starting: %d", i, e)
 		ck.Append("x", "x 0 "+strconv.Itoa(i)+" y")
+		DPrintf("the %dth iter finished: %d", i, e)
 	}
 	dur := time.Since(start)
+	DPrintf("dur: %d", dur)
 
 	v := ck.Get("x")
 	checkClntAppends(t, 0, v, numOps)
