@@ -29,45 +29,102 @@ type Config struct {
 }
 
 const (
-	OK = "OK"
+	OK               = "OK"
+	ErrNone          = ""
+	ErrWrongLeader   = "ErrWrongLeader"
+	ErrLeaderChanged = "ErrLeaderChanged"
+	ErrResultTimeout = "ErrResultTimeout"
+	ErrStaleRequest  = "ErrStaleReques"
+	ErrBadRequest    = "ErrBadRequest"
 )
 
 type Err string
+type ClerkID int64
+type SeqID int64
+type OpType string
+
+const (
+	OpJoin  = "join"
+	OpLeave = "leave"
+	OpQuery = "query"
+	OpMove  = "move"
+)
+
+type ClerkInfo struct {
+	ClerkID ClerkID
+	SeqID   SeqID
+}
+
+type Reply interface {
+	IsWrongLeader() bool
+	GetErr() Err
+}
+
+type Args interface {
+	// GetSeqID() SeqID
+	SetSeqID(seqID SeqID)
+	GetClerk() ClerkInfo
+}
+
+type BaseReply struct {
+	WrongLeader bool
+	Err         Err
+}
+
+type BaseArgs struct {
+	ClerkInfo
+}
+
+func (a *BaseArgs) GetClerk() ClerkInfo {
+	return a.ClerkInfo
+}
+
+func (a *BaseArgs) SetSeqID(seqID SeqID) {
+	a.SeqID = seqID
+}
+
+func (r *BaseReply) GetErr() Err {
+	return r.Err
+}
+
+func (r *BaseReply) IsWrongLeader() bool {
+	return r.WrongLeader
+}
 
 type JoinArgs struct {
 	Servers map[int][]string // new GID -> servers mappings
+	BaseArgs
 }
 
 type JoinReply struct {
-	WrongLeader bool
-	Err         Err
+	BaseReply
 }
 
 type LeaveArgs struct {
 	GIDs []int
+	BaseArgs
 }
 
 type LeaveReply struct {
-	WrongLeader bool
-	Err         Err
+	BaseReply
 }
 
 type MoveArgs struct {
 	Shard int
 	GID   int
+	BaseArgs
 }
 
 type MoveReply struct {
-	WrongLeader bool
-	Err         Err
+	BaseReply
 }
 
 type QueryArgs struct {
 	Num int // desired config number
+	BaseArgs
 }
 
 type QueryReply struct {
-	WrongLeader bool
-	Err         Err
-	Config      Config
+	Config Config
+	BaseReply
 }
