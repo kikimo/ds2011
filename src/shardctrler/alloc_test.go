@@ -12,6 +12,14 @@ func TestShardAllocation(t *testing.T) {
 			name: "",
 			cfg: Config{
 				Shards: [NShards]int{},
+				Groups: map[int][]string{},
+			},
+			expectedShards: [NShards]int{0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
+		},
+		{
+			name: "",
+			cfg: Config{
+				Shards: [NShards]int{},
 				Groups: map[int][]string{
 					1: nil,
 				},

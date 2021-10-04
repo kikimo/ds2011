@@ -49,7 +49,7 @@ func (c *Config) buildGroupShard() ([]GroupShard, []int) {
 	return gShards, freeShards
 }
 
-func (c *Config) Clone() *Config {
+func (c *Config) Clone() Config {
 	shards := [NShards]int{}
 	for i := 0; i < NShards; i++ {
 		shards[i] = c.Shards[i]
@@ -68,7 +68,7 @@ func (c *Config) Clone() *Config {
 		groups[gid] = copiedServers
 	}
 
-	cfg := &Config{
+	cfg := Config{
 		Num:    c.Num,
 		Shards: shards,
 		Groups: groups,
@@ -80,6 +80,11 @@ func (c *Config) Clone() *Config {
 // BalanceShard divids shards among groups as evenly as possible
 // and move as few shards as possible.
 func (c *Config) BalanceShard() {
+	groupNum := len(c.Groups)
+	if groupNum == 0 {
+		// nothing to balance if there are no any group
+		return
+	}
 	gShards, freeShards := c.buildGroupShard()
 
 	// sort GroupShard by size of shards in descending order
@@ -97,7 +102,6 @@ func (c *Config) BalanceShard() {
 	})
 
 	// now balance shards among groups
-	groupNum := len(c.Groups)
 	shardPerGroup := NShards / groupNum
 	shardAlloc := make([]int, groupNum) // [gid]numberShards
 	for i := range shardAlloc {
@@ -149,4 +153,41 @@ func (c *Config) BalanceShard() {
 			c.Shards[shard] = gShard.gid
 		}
 	}
+}
+
+func (c *Config) Join(server map[int][]string) {
+	for gid, servers := range server {
+		c.Groups[gid] = servers
+	}
+}
+
+func (c *Config) Leave(GIDs []int) {
+	leaveSet := map[int]struct{}{}
+	for _, gid := range GIDs {
+		leaveSet[gid] = struct{}{}
+		delete(c.Groups, gid)
+	}
+
+	for i, gid := range c.Shards {
+		if _, ok := leaveSet[gid]; ok {
+			c.Shards[i] = 0
+		}
+	}
+}
+
+func (c *Config) Move(GID int, shard int) bool {
+	exist := false
+	for gid, _ := range c.Groups {
+		if gid == GID {
+			exist = true
+			break
+		}
+	}
+
+	if !exist {
+		return false
+	}
+
+	c.Shards[shard] = GID
+	return true
 }
