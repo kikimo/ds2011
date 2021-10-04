@@ -35,8 +35,14 @@ type ShardCtrler struct {
 
 type Op struct {
 	// Your data here.
-	OpType OpType
-	Args   Args
+	OpType     OpType
+	JoinArgsP  *JoinArgs
+	LeaveArgsP *LeaveArgs
+	MoveArgsP  *MoveArgs
+	QueryArgsP *QueryArgs
+
+	// using interface type Args will paralysis rcp object serialization mechanism
+	// Args   Args
 }
 
 type OpAgent struct {
@@ -72,7 +78,7 @@ func (sc *ShardCtrler) tryUpdateClerkInfo(clerkInfo ClerkInfo) bool {
 
 type OpResultCallback func(opResult *OpResult)
 
-func (sc *ShardCtrler) callOp(args Args, reply *BaseReply, op OpType, cb OpResultCallback) {
+func (sc *ShardCtrler) callOp(cmd Op, reply *BaseReply, op OpType, cb OpResultCallback) {
 	// Your code here.
 	_, isLeader := sc.rf.GetState()
 	if !isLeader {
@@ -82,10 +88,6 @@ func (sc *ShardCtrler) callOp(args Args, reply *BaseReply, op OpType, cb OpResul
 	}
 
 	sc.mu.Lock()
-	cmd := Op{
-		OpType: op,
-		Args:   args,
-	}
 	index, term, isLeader := sc.rf.Start(cmd)
 	if !isLeader {
 		reply.WrongLeader = true
@@ -93,6 +95,7 @@ func (sc *ShardCtrler) callOp(args Args, reply *BaseReply, op OpType, cb OpResul
 		sc.mu.Unlock()
 		return
 	}
+	DPrintf("sc running %s: %+v", op, cmd)
 
 	agent := OpAgent{
 		resultCh: make(chan OpResult, 1),
@@ -103,7 +106,7 @@ func (sc *ShardCtrler) callOp(args Args, reply *BaseReply, op OpType, cb OpResul
 	// wait for result
 	select {
 	case <-time.After(4 * time.Second):
-		DPrintf("sc timeout waiting joing result, args %+v, index %d, term %d", args, index, term)
+		DPrintf("sc timeout waiting joing result, cmd %+v, index %d, term %d", cmd, index, term)
 		reply.Err = ErrResultTimeout
 	case e := <-agent.resultCh:
 		cb(&e)
@@ -121,7 +124,11 @@ func (sc *ShardCtrler) Join(args *JoinArgs, reply *JoinReply) {
 		}
 	}
 
-	sc.callOp(args, &reply.BaseReply, OpJoin, cb)
+	cmd := Op{
+		OpType:    OpJoin,
+		JoinArgsP: args,
+	}
+	sc.callOp(cmd, &reply.BaseReply, OpJoin, cb)
 }
 
 func (sc *ShardCtrler) Leave(args *LeaveArgs, reply *LeaveReply) {
@@ -135,13 +142,17 @@ func (sc *ShardCtrler) Leave(args *LeaveArgs, reply *LeaveReply) {
 		}
 	}
 
-	sc.callOp(args, &reply.BaseReply, OpLeave, cb)
+	cmd := Op{
+		OpType:     OpLeave,
+		LeaveArgsP: args,
+	}
+	sc.callOp(cmd, &reply.BaseReply, OpLeave, cb)
 }
 
 func (sc *ShardCtrler) Move(args *MoveArgs, reply *MoveReply) {
 	// Your code here.
 	cb := func(opResult *OpResult) {
-		DPrintf("sc leave result %+v", opResult)
+		DPrintf("sc move result %+v", opResult)
 		if opResult.Reply != nil {
 			*reply = opResult.Reply.(MoveReply)
 		} else if opResult.Err != "" {
@@ -149,13 +160,17 @@ func (sc *ShardCtrler) Move(args *MoveArgs, reply *MoveReply) {
 		}
 	}
 
-	sc.callOp(args, &reply.BaseReply, OpMove, cb)
+	cmd := Op{
+		OpType:    OpMove,
+		MoveArgsP: args,
+	}
+	sc.callOp(cmd, &reply.BaseReply, OpMove, cb)
 }
 
 func (sc *ShardCtrler) Query(args *QueryArgs, reply *QueryReply) {
 	// Your code here.
 	cb := func(opResult *OpResult) {
-		DPrintf("sc leave result %+v", opResult)
+		DPrintf("sc query result %+v", opResult)
 		if opResult.Reply != nil {
 			*reply = opResult.Reply.(QueryReply)
 		} else if opResult.Err != "" {
@@ -163,7 +178,11 @@ func (sc *ShardCtrler) Query(args *QueryArgs, reply *QueryReply) {
 		}
 	}
 
-	sc.callOp(args, &reply.BaseReply, OpQuery, cb)
+	cmd := Op{
+		OpType:     OpQuery,
+		QueryArgsP: args,
+	}
+	sc.callOp(cmd, &reply.BaseReply, OpQuery, cb)
 }
 
 //
@@ -183,10 +202,11 @@ func (sc *ShardCtrler) Raft() *raft.Raft {
 }
 
 // assume sc.mu lock hold
-func (sc *ShardCtrler) handleJoin(op *Op, commandIndex int) {
-	args := op.Args.(*JoinArgs)
+func (sc *ShardCtrler) handleJoin(op Op, commandIndex int) {
+	args := op.JoinArgsP
 	latestConfig := sc.latestConfig()
 	newConfig := latestConfig.Clone()
+	newConfig.Num = latestConfig.Num + 1
 	newConfig.Join(args.Servers)
 	newConfig.BalanceShard()
 	sc.configs = append(sc.configs, newConfig)
@@ -203,10 +223,11 @@ func (sc *ShardCtrler) handleJoin(op *Op, commandIndex int) {
 }
 
 // assume sc.mu lock hold
-func (sc *ShardCtrler) handleLeave(op *Op, commandIndex int) {
-	args := op.Args.(*LeaveArgs)
+func (sc *ShardCtrler) handleLeave(op Op, commandIndex int) {
+	args := op.LeaveArgsP
 	latestConfig := sc.latestConfig()
 	newConfig := latestConfig.Clone()
+	newConfig.Num = latestConfig.Num + 1
 	newConfig.Leave(args.GIDs)
 	newConfig.BalanceShard()
 	sc.configs = append(sc.configs, newConfig)
@@ -222,19 +243,21 @@ func (sc *ShardCtrler) handleLeave(op *Op, commandIndex int) {
 	}
 }
 
-func (sc *ShardCtrler) handleQuery(op *Op, commandIndex int) {
-	args := op.Args.(*QueryArgs)
+func (sc *ShardCtrler) handleQuery(op Op, commandIndex int) {
+	args := op.QueryArgsP
 	sz := len(sc.configs)
-	if args.Num == -1 {
-		args.Num = sz - 1
+	num := args.Num
+	if num == -1 {
+		num = sz - 1
 	}
 
 	reply := QueryReply{}
 	if agent, ok := sc.opAgents[commandIndex]; ok {
-		if args.Num < 0 || args.Num >= sz {
+		if num < 0 || num >= sz {
 			reply.Err = ErrBadRequest
 		} else {
-			reply.Config = sc.configs[args.Num]
+			reply.Config = sc.configs[num]
+			DPrintf("sc serving config for %d: %+v, all configs: %+v", num, reply.Config, sc.configs)
 		}
 
 		delete(sc.opAgents, commandIndex)
@@ -249,11 +272,12 @@ func (sc *ShardCtrler) latestConfig() *Config {
 	return &sc.configs[sz-1]
 }
 
-func (sc *ShardCtrler) handleMove(op *Op, commandIndex int) {
+func (sc *ShardCtrler) handleMove(op Op, commandIndex int) {
 	// TODO check result
-	args := op.Args.(*MoveArgs)
+	args := op.MoveArgsP
 	latestConfig := sc.latestConfig()
 	newConfig := latestConfig.Clone()
+	newConfig.Num = latestConfig.Num + 1
 	reply := MoveReply{}
 	if !newConfig.Move(args.GID, args.Shard) {
 		DPrintf("sc error move shard %d to group %d", args.Shard, args.Shard)
@@ -270,6 +294,8 @@ func (sc *ShardCtrler) handleMove(op *Op, commandIndex int) {
 	}
 }
 
+type CMDHandler func(Op, int)
+
 func (sc *ShardCtrler) handleCmd(msg *raft.ApplyMsg) {
 	op := msg.Command.(Op)
 	// args := op.Args.(JoinArgs)
@@ -281,7 +307,26 @@ func (sc *ShardCtrler) handleCmd(msg *raft.ApplyMsg) {
 	}
 
 	sc.lastApplied = msg.CommandIndex
-	if !sc.tryUpdateClerkInfo(op.Args.GetClerk()) {
+	var cmdHandler CMDHandler
+	var clerkInfo ClerkInfo
+	switch op.OpType {
+	case OpJoin:
+		cmdHandler = sc.handleJoin
+		clerkInfo = op.JoinArgsP.GetClerk()
+	case OpLeave:
+		cmdHandler = sc.handleLeave
+		clerkInfo = op.LeaveArgsP.GetClerk()
+	case OpQuery:
+		cmdHandler = sc.handleQuery
+		clerkInfo = op.QueryArgsP.GetClerk()
+	case OpMove:
+		cmdHandler = sc.handleMove
+		clerkInfo = op.MoveArgsP.GetClerk()
+	default:
+		panic(fmt.Sprintf("unknonw op type: %s", op.OpType))
+	}
+
+	if !sc.tryUpdateClerkInfo(clerkInfo) {
 		// stale req
 		if agent, ok := sc.opAgents[msg.CommandIndex]; ok {
 			// TODO check term?
@@ -292,19 +337,7 @@ func (sc *ShardCtrler) handleCmd(msg *raft.ApplyMsg) {
 
 		return
 	}
-
-	switch op.OpType {
-	case OpJoin:
-		sc.handleJoin(&op, msg.CommandIndex)
-	case OpLeave:
-		sc.handleLeave(&op, msg.CommandIndex)
-	case OpQuery:
-		sc.handleQuery(&op, msg.CommandIndex)
-	case OpMove:
-		sc.handleMove(&op, msg.CommandIndex)
-	default:
-		panic(fmt.Sprintf("unknonw op type: %s", op.OpType))
-	}
+	cmdHandler(op, msg.CommandIndex)
 }
 
 func (sc *ShardCtrler) execCmd() {
