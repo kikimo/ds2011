@@ -16,7 +16,6 @@ type GroupShard struct {
 	shards []int
 }
 
-// TODO unit test me
 func (c *Config) buildGroupShard() ([]GroupShard, []int) {
 	// map gid to shards
 	gShardMap := map[int][]int{}
@@ -151,7 +150,3 @@ func (c *Config) BalanceShard() {
 		}
 	}
 }
-
-// func (c *Config) String() string {
-
-// }
