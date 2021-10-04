@@ -112,19 +112,19 @@ func (c *Config) BalanceShard() {
 	for i := 0; i < extraShards; i++ {
 		shardAlloc[i]++
 	}
+	DPrintf("sc shardAlloc after balance: %+v", shardAlloc)
 	// fmt.Printf("shard alloc: %+v, sz: %d\n", shardAlloc, len(shardAlloc))
 	// fmt.Printf("gShard: %+v\n", gShards)
 
 	for i := 0; i < groupNum; i++ {
 		sz := len(gShards[i].shards)
 		ideaSz := shardAlloc[i]
-		if sz == ideaSz {
-			break
-		} else if sz > ideaSz {
+		if sz > ideaSz {
 			// reserve extra shards from group
 			freeShards = append(freeShards, gShards[i].shards[ideaSz:]...)
 			gShards[i].shards = gShards[i].shards[:ideaSz]
-		} else { // sz < ideaSz
+			DPrintf("group %d, current shard size %d idea shard size %d, after adjusting %+v", i, sz, ideaSz, gShards[i].shards)
+		} else if sz < ideaSz {
 			// alloc shards from freeShards to group
 			need := ideaSz - sz
 			if len(freeShards) < need {
@@ -133,12 +133,13 @@ func (c *Config) BalanceShard() {
 
 			gShards[i].shards = append(gShards[i].shards, freeShards[:need]...)
 			freeShards = freeShards[need:]
-		}
+			DPrintf("group %d, current shard size %d idea shard size %d, after adjusting %+v", i, sz, ideaSz, gShards[i].shards)
+		} // else { break } // we cannot break right now, remember!
 	}
 
 	// check resut
 	if len(freeShards) != 0 {
-		panic(fmt.Sprintf("%d shards not allocated", len(freeShards)))
+		panic(fmt.Sprintf("%d shards not allocated: %+v, current gShard: %+v", len(freeShards), freeShards, gShards))
 	}
 
 	for i := 0; i < groupNum; i++ {
